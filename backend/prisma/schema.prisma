@@ -1,0 +1,734 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ==============================================================================
+// ENUMS (matching Phase 0 Specifications)
+// ==============================================================================
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+}
+
+enum LeadStatus {
+  // Canonical Acquisition Lifecycle
+  DISCOVERED
+  IMPORTED
+  RESEARCH_PENDING
+  RESEARCHED
+  QUALIFICATION_PENDING
+  QUALIFIED
+  CALL_READY
+  CONTACTED
+  INTERESTED
+  MEETING
+  WON
+  LOST
+  // Backward compatibility states
+  NEW
+  DISQUALIFIED
+  REPLIED
+  OPT_OUT
+}
+
+enum EmailMessageStatus {
+  DRAFT
+  APPROVED
+  QUEUED
+  SENT
+  REJECTED
+  FAILED
+}
+
+enum EmailEventType {
+  DELIVERED
+  BOUNCED
+  OPENED
+  CLICKED
+  REPLIED
+  OPT_OUT
+}
+
+enum CRMActivityType {
+  STAGE_CHANGE
+  NOTE
+  CALL_LOG
+  EMAIL_SENT
+  EMAIL_REPLIED
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum SuppressionType {
+  EMAIL
+  DOMAIN
+  PHONE
+}
+
+enum CallStatus {
+  QUEUED
+  SAFETY_CHECKING
+  APPROVAL_REQUIRED
+  APPROVED
+  INITIATING
+  RINGING
+  IN_PROGRESS
+  COMPLETED
+  BLOCKED
+  FAILED
+  CANCELLED
+  NO_ANSWER
+  BUSY
+  VOICEMAIL
+  OPTED_OUT
+}
+
+enum CallOutcomeType {
+  INTERESTED
+  NOT_INTERESTED
+  CALLBACK_REQUESTED
+  MEETING_REQUESTED
+  QUALIFIED
+  DISQUALIFIED
+  NO_ANSWER
+  BUSY
+  VOICEMAIL
+  INVALID_NUMBER
+  OPTED_OUT
+  DO_NOT_CALL
+  FAILED
+}
+
+enum CallEventType {
+  CALL_CREATED
+  CALL_INITIATED
+  CALL_RINGING
+  CALL_ANSWERED
+  CALL_STARTED
+  CALL_MEDIA_CONNECTED
+  CALL_TRANSFERRED
+  CALL_COMPLETED
+  CALL_FAILED
+  CALL_BUSY
+  CALL_NO_ANSWER
+  CALL_VOICEMAIL
+  CALL_CANCELLED
+  CALL_OPT_OUT
+}
+
+enum SuppressionReason {
+  OPT_OUT
+  HARD_BOUNCE
+  MANUAL_SUPPRESSION
+}
+
+enum NotificationType {
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+}
+
+// ==============================================================================
+// 17 AUTHORITATIVE PHASE 0 CONCEPTUAL ENTITIES (docs/SYSTEM-ARCHITECTURE.md)
+// ==============================================================================
+
+// 1. User: System user account (belongs to a Workspace)
+model User {
+  id           String         @id @default(uuid())
+  workspaceId  String
+  email        String         @unique
+  name         String
+  passwordHash String
+  role         UserRole       @default(MEMBER)
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  tasks         Task[]
+  notifications Notification[]
+  crmActivities CRMActivity[]
+  auditLogs     AuditLog[]
+
+  @@index([workspaceId])
+  @@index([email])
+  @@map("users")
+}
+
+// 2. Workspace: Multi-tenant isolation boundary
+model Workspace {
+  id           String         @id @default(uuid())
+  name         String
+  slug         String         @unique
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  users                  User[]
+  campaigns              Campaign[]
+  leads                  Lead[]
+  suppressions           Suppression[]
+  auditLogs              AuditLog[]
+  notifications          Notification[]
+  voiceAgentConfigs      VoiceAgentConfig[]
+  callingPolicy          WorkspaceCallingPolicy?
+  calls                  Call[]
+  n8nIntegrations        N8nIntegration[]
+  n8nWebhookDeliveries   N8nWebhookDelivery[]
+
+  @@index([slug])
+  @@map("workspaces")
+}
+
+// 3. Campaign: Targeting configuration belonging to a Workspace
+model Campaign {
+  id          String         @id @default(uuid())
+  workspaceId String
+  name        String
+  niche       String
+  location    String
+  targetOffer String
+  dailyCap    Int            @default(50)
+  status      CampaignStatus @default(DRAFT)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  leads         Lead[]
+  emailCampaign EmailCampaign?
+  voiceCampaign VoiceCampaign?
+  calls         Call[]
+
+  @@index([workspaceId])
+  @@index([status])
+  @@map("campaigns")
+}
+
+// 4. Lead: Target business or organization entity
+model Lead {
+  id           String     @id @default(uuid())
+  workspaceId  String
+  campaignId   String?
+  businessName String
+  domain       String?
+  phone        String?
+  address      String?
+  status       LeadStatus @default(NEW)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaign      Campaign?      @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  contacts      Contact[]
+  leadSource    LeadSource?
+  websiteAudit  WebsiteAudit?
+  aiAnalysis    AIAnalysis?
+  leadScore     LeadScore?
+  crmActivities CRMActivity[]
+  tasks         Task[]
+  calls         Call[]
+
+  @@unique([workspaceId, businessName, domain, phone, address], name: "unique_lead_match_key")
+  @@index([workspaceId])
+  @@index([campaignId])
+  @@index([status])
+  @@index([domain])
+  @@map("leads")
+}
+
+// 5. Contact: Individual person or decision-maker at a Lead (1:N with Lead)
+model Contact {
+  id        String   @id @default(uuid())
+  leadId    String
+  fullName  String
+  email     String
+  title     String?
+  phone     String?
+  isPrimary Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lead          Lead           @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  emailMessages EmailMessage[]
+  calls         Call[]
+
+  @@index([leadId])
+  @@index([email])
+  @@map("contacts")
+}
+
+// 6. LeadSource: Source tracking metadata (origin provider, external ID, query payload)
+model LeadSource {
+  id           String   @id @default(uuid())
+  leadId       String   @unique
+  provider     String
+  externalId   String
+  queryPayload Json?
+  createdAt    DateTime @default(now())
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([provider, externalId])
+  @@map("lead_sources")
+}
+
+// 7. WebsiteAudit: Technical, UX, mobile, and CTA audit observations
+model WebsiteAudit {
+  id                String   @id @default(uuid())
+  leadId            String   @unique
+  domain            String
+  mobileOptimized   Boolean  @default(false)
+  bookingCtaVisible Boolean  @default(false)
+  auditGaps         String[]
+  rawAuditData      Json?
+  auditedAt         DateTime @default(now())
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@map("website_audits")
+}
+
+// 8. AIAnalysis: Qualitative AI analysis, opportunity points, risk factors
+model AIAnalysis {
+  id                String   @id @default(uuid())
+  leadId            String   @unique
+  summary           String
+  opportunityPoints String[]
+  riskFactors       String[]
+  analyzedAt        DateTime @default(now())
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@map("ai_analyses")
+}
+
+// 9. LeadScore: Quantitative scoring metrics (0-100) and reasoning rationale
+model LeadScore {
+  id               String   @id @default(uuid())
+  leadId           String   @unique
+  relevanceScore   Int
+  opportunityScore Int
+  totalScore       Int
+  rationale        String
+  scoredAt         DateTime @default(now())
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([totalScore])
+  @@map("lead_scores")
+}
+
+// 10. EmailCampaign: Outreach sending configuration attached to a Campaign
+model EmailCampaign {
+  id             String   @id @default(uuid())
+  campaignId     String   @unique
+  fromEmail      String
+  fromName       String
+  scheduleConfig Json?
+  dailyCap       Int      @default(50)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  campaign      Campaign       @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  emailMessages EmailMessage[]
+
+  @@map("email_campaigns")
+}
+
+// 11. EmailMessage: An individual draft, queued, or sent cold email to a Contact
+model EmailMessage {
+  id                  String             @id @default(uuid())
+  emailCampaignId     String
+  contactId           String
+  subject             String
+  bodyText            String
+  status              EmailMessageStatus @default(DRAFT)
+  humanApprovalRequired Boolean          @default(true)
+  isApproved          Boolean            @default(false)
+  approvedByUserId    String?
+  approvedAt          DateTime?
+  sentAt              DateTime?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  emailCampaign EmailCampaign @relation(fields: [emailCampaignId], references: [id], onDelete: Cascade)
+  contact       Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  emailEvents   EmailEvent[]
+
+  @@index([emailCampaignId])
+  @@index([contactId])
+  @@index([status])
+  @@map("email_messages")
+}
+
+// 12. EmailEvent: Dispatched delivery webhook event (delivered, bounce, reply, opt-out)
+model EmailEvent {
+  id             String         @id @default(uuid())
+  emailMessageId String
+  eventType      EmailEventType
+  eventPayload   Json?
+  occurredAt     DateTime       @default(now())
+
+  emailMessage EmailMessage @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
+
+  @@index([emailMessageId])
+  @@index([eventType])
+  @@map("email_events")
+}
+
+// 13. CRMActivity: Sales interaction timeline log, notes, stage transitions
+model CRMActivity {
+  id          String          @id @default(uuid())
+  leadId      String
+  userId      String?
+  type        CRMActivityType
+  description String
+  metadata    Json?
+  createdAt   DateTime        @default(now())
+
+  lead Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([leadId])
+  @@index([type])
+  @@map("crm_activities")
+}
+
+// 14. Task: Actionable to-do item for a Lead assigned to a User
+model Task {
+  id               String     @id @default(uuid())
+  leadId           String
+  assignedToUserId String?
+  title            String
+  description      String?
+  dueDate          DateTime?
+  status           TaskStatus @default(PENDING)
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  lead     Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  assignee User? @relation(fields: [assignedToUserId], references: [id], onDelete: SetNull)
+
+  @@index([leadId])
+  @@index([assignedToUserId])
+  @@index([status])
+  @@map("tasks")
+}
+
+// 15. Suppression: Opt-out, unsubscribed, or bounced email/domain suppression rule
+model Suppression {
+  id          String            @id @default(uuid())
+  workspaceId String
+  type        SuppressionType
+  value       String
+  reason      SuppressionReason
+  createdAt   DateTime          @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, type, value], name: "unique_workspace_suppression")
+  @@index([workspaceId])
+  @@index([value])
+  @@map("suppressions")
+}
+
+// 16. AuditLog: Security and operational audit log capturing user actions & config changes
+model AuditLog {
+  id          String   @id @default(uuid())
+  workspaceId String
+  userId      String?
+  eventType   String
+  entityType  String
+  entityId    String
+  metadata    Json?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@index([eventType])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
+// 17. Notification: In-app alert notification dispatched to a User
+model Notification {
+  id          String           @id @default(uuid())
+  workspaceId String
+  userId      String
+  title       String
+  message     String
+  type        NotificationType @default(INFO)
+  isRead      Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([userId])
+  @@index([isRead])
+  @@map("notifications")
+}
+
+// ==============================================================================
+// PHASE 4 ENTITIES: AI VOICE OUTREACH & N8N INTEGRATION
+// ==============================================================================
+
+// 18. VoiceCampaign: Voice calling outreach config attached 1:1 to Campaign
+model VoiceCampaign {
+  id                 String            @id @default(uuid())
+  campaignId         String            @unique
+  dailyCallCap       Int               @default(25)
+  maxAttemptsPerLead Int               @default(3)
+  retryDelayMinutes  Int               @default(120)
+  allowedCallingDays Int[]             @default([1, 2, 3, 4, 5])
+  callingWindowStart String            @default("09:00")
+  callingWindowEnd   String            @default("17:00")
+  recordingConsent   Boolean           @default(false)
+  agentConfigId      String?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  campaign           Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  agentConfig        VoiceAgentConfig? @relation(fields: [agentConfigId], references: [id], onDelete: SetNull)
+  calls              Call[]
+
+  @@map("voice_campaigns")
+}
+
+// 19. VoiceAgentConfig: Structured prompt, objective, and guardrail rules
+model VoiceAgentConfig {
+  id                     String          @id @default(uuid())
+  workspaceId            String
+  name                   String
+  callObjective          String
+  openingScript          String
+  qualificationQuestions String[]
+  approvedTalkingPoints  String[]
+  objectionHandling      Json?
+  prohibitedClaims       String[]
+  escalationConditions   String[]
+  fallbackBehavior       String?
+  maxDurationSeconds     Int             @default(300)
+  createdAt              DateTime        @default(now())
+  updatedAt              DateTime        @updatedAt
+
+  workspace              Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  voiceCampaigns         VoiceCampaign[]
+  calls                  Call[]
+
+  @@index([workspaceId])
+  @@map("voice_agent_configs")
+}
+
+// 20. Call: Authoritative primary call entity
+model Call {
+  id                    String            @id @default(uuid())
+  workspaceId           String
+  campaignId            String?
+  voiceCampaignId       String?
+  leadId                String
+  contactId             String
+  agentConfigId         String?
+  recipientPhone        String
+  normalizedPhone       String
+  status                CallStatus        @default(QUEUED)
+  humanApprovalRequired Boolean           @default(true)
+  isApproved            Boolean           @default(false)
+  approvedByUserId      String?
+  approvedAt            DateTime?
+  idempotencyKey        String?
+  scheduledAt           DateTime?
+  initiatedAt           DateTime?
+  completedAt           DateTime?
+  durationSeconds       Int?
+  providerName          String            @default("twilio")
+  providerCallId        String?
+  blockedReason         String?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  workspace             Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaign              Campaign?         @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  voiceCampaign         VoiceCampaign?     @relation(fields: [voiceCampaignId], references: [id], onDelete: SetNull)
+  lead                  Lead              @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  contact               Contact           @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  agentConfig           VoiceAgentConfig? @relation(fields: [agentConfigId], references: [id], onDelete: SetNull)
+  attempts              CallAttempt[]
+  events                CallEvent[]
+  transcripts           CallTranscript[]
+  outcome               CallOutcome?
+
+  @@unique([workspaceId, idempotencyKey], name: "unique_workspace_call_idempotency")
+  @@index([workspaceId])
+  @@index([campaignId])
+  @@index([leadId])
+  @@index([contactId])
+  @@index([status])
+  @@index([normalizedPhone])
+  @@map("calls")
+}
+
+// 21. CallAttempt: Individual telephony attempts
+model CallAttempt {
+  id              String      @id @default(uuid())
+  callId          String
+  attemptNumber   Int
+  providerCallId  String?
+  status          CallStatus
+  durationSeconds Int?
+  failureReason   String?
+  isRetryable     Boolean     @default(false)
+  startedAt       DateTime    @default(now())
+  endedAt         DateTime?
+
+  call            Call        @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([callId])
+  @@map("call_attempts")
+}
+
+// 22. CallEvent: Normalized timeline events
+model CallEvent {
+  id           String        @id @default(uuid())
+  callId       String
+  eventType    CallEventType
+  eventPayload Json?
+  occurredAt   DateTime      @default(now())
+
+  call         Call          @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([callId])
+  @@index([eventType])
+  @@map("call_events")
+}
+
+// 23. CallTranscript: Structured conversation turns
+model CallTranscript {
+  id          String   @id @default(uuid())
+  callId      String
+  turnIndex   Int
+  speaker     String
+  text        String
+  confidence  Float?
+  timestampMs Int?
+  createdAt   DateTime @default(now())
+
+  call        Call     @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([callId])
+  @@map("call_transcripts")
+}
+
+// 24. CallOutcome: AI outcome classification & summary
+model CallOutcome {
+  id                String          @id @default(uuid())
+  callId            String          @unique
+  outcome           CallOutcomeType
+  interestLevel     String
+  objections        String[]
+  requestedFollowUp String?
+  nextAction        String?
+  sentiment         String?
+  optOutDetected    Boolean         @default(false)
+  summary           String
+  derivedFromActual Boolean         @default(true)
+  analyzedAt        DateTime        @default(now())
+
+  call              Call            @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@map("call_outcomes")
+}
+
+// 25. N8nIntegration: Workspace-scoped credentials for n8n orchestration
+model N8nIntegration {
+  id          String      @id @default(uuid())
+  workspaceId String
+  name        String
+  apiKeyHash  String
+  keyPrefix   String
+  scopes      String[]
+  webhookUrl  String?
+  isActive    Boolean     @default(true)
+  lastUsedAt  DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  revokedAt   DateTime?
+
+  workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deliveries  N8nWebhookDelivery[]
+
+  @@index([workspaceId])
+  @@index([keyPrefix])
+  @@map("n8n_integrations")
+}
+
+// 26. N8nWebhookDelivery: Audit log of events pushed to n8n
+model N8nWebhookDelivery {
+  id            String    @id @default(uuid())
+  workspaceId   String
+  integrationId String
+  eventId       String
+  eventType     String
+  payload       Json
+  statusCode    Int?
+  status        String
+  attempts      Int       @default(1)
+  lastError     String?
+  deliveredAt   DateTime?
+  createdAt     DateTime  @default(now())
+
+  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  integration   N8nIntegration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([integrationId])
+  @@index([eventId])
+  @@map("n8n_webhook_deliveries")
+}
+
+// 27. WorkspaceCallingPolicy: Reusable workspace-level calling governance & limits
+model WorkspaceCallingPolicy {
+  id                     String     @id @default(uuid())
+  workspaceId            String     @unique
+  dailyCallLimit         Int        @default(25)
+  maxConcurrentCalls     Int        @default(1)
+  maxAttemptsPerLead     Int        @default(3)
+  retryDelayMinutes      Int        @default(120)
+  allowedCallingDays     Int[]      @default([1, 2, 3, 4, 5])
+  callingWindowStart     String     @default("09:00")
+  callingWindowEnd       String     @default("17:00")
+  recordingConsent       Boolean    @default(false)
+  humanApprovalRequired Boolean    @default(true)
+  providerRestrictions   String[]   @default([])
+  isActive               Boolean    @default(true)
+  createdAt              DateTime   @default(now())
+  updatedAt              DateTime   @updatedAt
+
+  workspace              Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("workspace_calling_policies")
+}

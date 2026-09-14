@@ -1,0 +1,39 @@
+{
+  "name": "closevds-backend",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "closeVDS — AI Client Acquisition OS Backend Foundation",
+  "main": "dist/server/index.js",
+  "scripts": {
+    "dev": "tsx watch src/server/index.ts",
+    "build": "tsc",
+    "start": "node dist/server/index.js",
+    "typecheck": "tsc --noEmit",
+    "prisma:generate": "prisma generate",
+    "test": "tsx tests/health.test.ts && tsx tests/database.test.ts && tsx tests/auth.test.ts && tsx tests/leads.test.ts && tsx tests/campaigns.test.ts && tsx tests/discovery-research.test.ts && tsx tests/qualification-personalization.test.ts && tsx tests/outreach.test.ts && tsx tests/safety-approval.test.ts && tsx tests/crm.test.ts && tsx tests/follow-ups.test.ts && tsx tests/analytics.test.ts && tsx tests/settings-notifications.test.ts && tsx tests/integrations-webhooks.test.ts && tsx tests/jobs.test.ts && tsx tests/provider-adapters.test.ts && tsx tests/e2e-simulation.test.ts && tsx tests/voice-safety-lifecycle.test.ts && tsx tests/voice-provider-twilio.test.ts && tsx tests/voice-grounding-ai.test.ts && tsx tests/n8n-integration.test.ts && tsx tests/operations-workspace.test.ts"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/cors": "^10.0.2",
+    "@fastify/helmet": "^13.0.1",
+    "@fastify/rate-limit": "^10.2.2",
+    "@google/generative-ai": "^0.24.1",
+    "@langchain/core": "^1.2.9",
+    "@langchain/langgraph": "^1.4.14",
+    "@prisma/client": "^6.4.1",
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "jsonwebtoken": "^9.0.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.8",
+    "@types/node": "^22.13.5",
+    "prisma": "^6.4.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
