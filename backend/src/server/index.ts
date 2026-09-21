@@ -31,6 +31,7 @@ async function main(): Promise<void> {
 
     // Non-blocking initial database health visibility check
     try {
+      await databaseClient.connect();
       const dbHealth = await databaseClient.healthCheck();
       if (dbHealth.ready) {
         app.log.info(`[Startup] Database connection verified (${dbHealth.status}, latency: ${dbHealth.latencyMs ?? 0}ms)`);
