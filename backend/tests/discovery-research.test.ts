@@ -26,6 +26,8 @@ import type {
   NormalizedLeadCandidate,
 } from '../src/integrations/lead-discovery/index.js';
 import type { AIService, AuditResult } from '../src/integrations/ai/index.js';
+import { ProviderError } from '../src/integrations/core/provider.types.js';
+import { StandardDiscoveryAdapter } from '../src/integrations/lead-discovery/discovery.adapter.js';
 
 async function runDiscoveryResearchTests() {
   console.log('\n--- Starting closeVDS Discovery & Research Domain Tests ---');
@@ -36,6 +38,95 @@ async function runDiscoveryResearchTests() {
   const leadSourcesStore: Map<string, LeadSource> = new Map();
   const websiteAuditsStore: Map<string, WebsiteAudit> = new Map();
   const auditLogsStore: AuditLog[] = [];
+
+  // Deterministic mock fixtures for OSM (Nominatim + Overpass API)
+  const mockNominatimSuccess = JSON.stringify([
+    {
+      place_id: 12345,
+      osm_type: 'relation',
+      osm_id: 65606,
+      boundingbox: ['51.28676', '51.69187', '-0.51037', '0.33401'],
+      display_name: 'London, Greater London, England, United Kingdom',
+    },
+  ]);
+
+  const mockOverpassSuccess = JSON.stringify({
+    version: 0.6,
+    generator: 'Overpass API',
+    elements: [
+      {
+        type: 'node',
+        id: 1001,
+        lat: 51.5123,
+        lon: -0.1234,
+        tags: {
+          name: 'London Dental Care',
+          amenity: 'dentist',
+          'addr:street': 'Fleet Street',
+          'addr:housenumber': '10',
+          'addr:city': 'London',
+          'addr:postcode': 'EC4A 2AB',
+          'addr:country': 'UK',
+          phone: '+442071234567',
+          website: 'https://londondental.co.uk',
+        },
+      },
+      {
+        type: 'way',
+        id: 2002,
+        center: { lat: 51.5145, lon: -0.1256 },
+        tags: {
+          name: 'Holborn Premier Dental',
+          healthcare: 'dentist',
+          'addr:street': 'High Holborn',
+          'addr:city': 'London',
+          'contact:phone': '+442079876543',
+          'contact:website': 'https://holbornpremier.co.uk',
+        },
+      },
+      {
+        type: 'node',
+        id: 3003,
+        lat: 51.5167,
+        lon: -0.1278,
+        tags: {
+          // Unnamed dental element - must be excluded by name filter
+          amenity: 'dentist',
+          'addr:street': 'Drury Lane',
+        },
+      },
+    ],
+  });
+
+  let nominatimResponseOverride: string | null = null;
+  let overpassResponseOverride: string | null = null;
+  let overpassStatusOverride = 200;
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    if (urlStr.includes('nominatim.openstreetmap.org')) {
+      const body = nominatimResponseOverride !== null ? nominatimResponseOverride : mockNominatimSuccess;
+      return new Response(body, {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (urlStr.includes('overpass-api.de')) {
+      if (overpassStatusOverride !== 200) {
+        return new Response('Overpass server error', {
+          status: overpassStatusOverride,
+          statusText: 'Gateway Timeout',
+        });
+      }
+      const body = overpassResponseOverride !== null ? overpassResponseOverride : mockOverpassSuccess;
+      return new Response(body, {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return originalFetch(input, init);
+  };
 
   const mockPrisma = {
     lead: {
@@ -280,6 +371,94 @@ async function runDiscoveryResearchTests() {
     console.log('✓ Discovery normalization, persistence, deduplication, tenant isolation, and campaign-optional audit passed');
 
     // --------------------------------------------------------------------------
+    // 2b. OpenStreetMap + Overpass Adapter Tests (Mocked Fetch)
+    // --------------------------------------------------------------------------
+    console.log('Test 2b: OpenStreetMap + Overpass candidate discovery & mapping...');
+    const osmAdapter = new StandardDiscoveryAdapter();
+
+    // 1. Valid geocoding + Overpass response
+    const osmCandidates = await osmAdapter.discoverCandidates({
+      niche: 'dentist',
+      location: 'London',
+      limit: 10,
+    });
+    assert.equal(osmCandidates.length, 2, 'Should discover exactly 2 named candidates (unnamed filtered)');
+
+    // 2. OSM candidate mapping
+    const c1 = osmCandidates[0];
+    assert.equal(c1.rawId, 'osm_node_1001');
+    assert.equal(c1.rawName, 'London Dental Care');
+    assert.equal(c1.rawAddress, '10, Fleet Street, London, EC4A 2AB, UK');
+    assert.equal(c1.rawPhone, '+442071234567');
+    assert.equal(c1.rawWebsite, 'https://londondental.co.uk');
+    assert.equal(c1.rawCategory, 'dentist');
+    assert.equal(c1.metadata?.latitude, 51.5123);
+    assert.equal(c1.metadata?.longitude, -0.1234);
+    assert.equal(c1.metadata?.osmType, 'node');
+    assert.equal(c1.metadata?.osmId, 1001);
+
+    const norm1 = osmAdapter.normalizeCandidate(c1);
+    assert.equal(norm1.businessName, 'London Dental Care');
+    assert.equal(norm1.domain, 'londondental.co.uk');
+    assert.equal(norm1.sourceProvider, 'OpenStreetMap');
+
+    const c2 = osmCandidates[1];
+    assert.equal(c2.rawId, 'osm_way_2002');
+    assert.equal(c2.rawPhone, '+442079876543');
+    assert.equal(c2.rawWebsite, 'https://holbornpremier.co.uk');
+    assert.equal(c2.metadata?.latitude, 51.5145);
+
+    // 3. Limit handling
+    const limitedCandidates = await osmAdapter.discoverCandidates({
+      niche: 'dentist',
+      location: 'London',
+      limit: 1,
+    });
+    assert.equal(limitedCandidates.length, 1);
+
+    // 4. Empty Nominatim result (graceful empty list)
+    nominatimResponseOverride = JSON.stringify([]);
+    const emptyLocCandidates = await osmAdapter.discoverCandidates({
+      niche: 'dentist',
+      location: 'NonExistentCityXYZ',
+      limit: 10,
+    });
+    assert.deepEqual(emptyLocCandidates, [], 'Unmatched location should gracefully return empty list');
+    nominatimResponseOverride = null;
+
+    // 5. Empty Overpass result (graceful empty list)
+    overpassResponseOverride = JSON.stringify({ elements: [] });
+    const emptyBizCandidates = await osmAdapter.discoverCandidates({
+      niche: 'obscure_niche',
+      location: 'London',
+      limit: 10,
+    });
+    assert.deepEqual(emptyBizCandidates, [], 'No businesses found should gracefully return empty list');
+    overpassResponseOverride = null;
+
+    // 6. Overpass / network failure error handling
+    overpassStatusOverride = 504;
+    await assert.rejects(
+      async () => osmAdapter.discoverCandidates({ niche: 'dentist', location: 'London', limit: 10 }),
+      (err: unknown) => err instanceof ProviderError && (err as ProviderError).code === 'PROVIDER_UNAVAILABLE'
+    );
+    // When executed through service, returns unavailable status cleanly
+    const osmService = new DiscoveryDomainService(
+      osmAdapter,
+      testLeadRepo,
+      testLeadSourceRepo,
+      testAuditRepo
+    );
+    const failRes = await osmService.executeDiscovery(workspaceA, 'user_a', {
+      niche: 'dentist',
+      location: 'London',
+      limit: 10,
+    });
+    assert.equal(failRes.status, 'unavailable');
+    overpassStatusOverride = 200; // restore
+    console.log('✓ OSM + Overpass geocoding, candidate mapping, limit, empty states, and error handling passed');
+
+    // --------------------------------------------------------------------------
     // 3. Lead Research & Website Audit
     // --------------------------------------------------------------------------
     console.log('Test 5-8: Lead research observations & AI audit provider...');
@@ -361,8 +540,9 @@ async function runDiscoveryResearchTests() {
     });
     assert.equal(unauthDiscovery.statusCode, 401);
 
-    // Authenticated discovery query with default unconfigured service
-    const authDiscovery = await app.inject({
+    // Authenticated discovery query when Overpass provider fails -> status: unavailable
+    overpassStatusOverride = 504;
+    const authDiscoveryFail = await app.inject({
       method: 'POST',
       url: '/api/v1/lead-discovery/query',
       headers: { authorization: `Bearer ${tokenA}` },
@@ -372,9 +552,10 @@ async function runDiscoveryResearchTests() {
         location: 'London',
       },
     });
-    assert.equal(authDiscovery.statusCode, 200);
-    const discBody = JSON.parse(authDiscovery.payload);
-    assert.equal(discBody.status, 'unavailable');
+    assert.equal(authDiscoveryFail.statusCode, 200);
+    const discFailBody = JSON.parse(authDiscoveryFail.payload);
+    assert.equal(discFailBody.status, 'unavailable');
+    overpassStatusOverride = 200; // restore
 
     // Authenticated discovery query containing only niche + location + limit (UI discovery format)
     const campaignlessDiscovery = await app.inject({
@@ -390,7 +571,9 @@ async function runDiscoveryResearchTests() {
     assert.equal(campaignlessDiscovery.statusCode, 200);
     const campaignlessBody = JSON.parse(campaignlessDiscovery.payload);
     assert.equal(campaignlessBody.success, true);
-    assert.equal(campaignlessBody.status, 'unavailable');
+    assert.equal(campaignlessBody.status, 'completed');
+    assert.equal(campaignlessBody.discoveredCount, 2);
+    assert.equal(campaignlessBody.persistedCount, 2);
 
     // Authenticated get audit
     const getAuditRes = await app.inject({
@@ -414,6 +597,7 @@ async function runDiscoveryResearchTests() {
     console.log('✓ Fastify Discovery and Research HTTP endpoints passed');
     console.log('\n--- All Discovery & Research Tests Passed Successfully ---');
   } finally {
+    globalThis.fetch = originalFetch;
     databaseClient.setPrismaClient(null);
   }
 }

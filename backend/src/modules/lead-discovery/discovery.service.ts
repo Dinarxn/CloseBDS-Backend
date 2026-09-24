@@ -1,7 +1,9 @@
 import type {
   LeadDiscoveryService,
   NormalizedLeadCandidate,
+  RawLeadCandidate,
 } from '../../integrations/lead-discovery/index.js';
+import { StandardDiscoveryAdapter } from '../../integrations/lead-discovery/discovery.adapter.js';
 import {
   LeadRepository,
   LeadSourceRepository,
@@ -73,12 +75,23 @@ export class DiscoveryDomainService {
       };
     }
 
-    const rawCandidates = await this.provider.discoverCandidates({
-      niche: query.niche,
-      location: query.location,
-      limit: query.limit,
-      countryCode: query.countryCode,
-    });
+    let rawCandidates: RawLeadCandidate[] = [];
+    try {
+      rawCandidates = await this.provider.discoverCandidates({
+        niche: query.niche,
+        location: query.location,
+        limit: query.limit,
+        countryCode: query.countryCode,
+      });
+    } catch (err: unknown) {
+      return {
+        status: 'unavailable',
+        message: err instanceof Error ? err.message : 'Discovery provider unavailable',
+        discoveredCount: 0,
+        persistedCount: 0,
+        skippedDuplicateCount: 0,
+      };
+    }
 
     let persistedCount = 0;
     let skippedDuplicateCount = 0;
@@ -446,4 +459,6 @@ export class DiscoveryDomainService {
   }
 }
 
-export const discoveryDomainService = new DiscoveryDomainService();
+export const discoveryDomainService = new DiscoveryDomainService(
+  new StandardDiscoveryAdapter()
+);
