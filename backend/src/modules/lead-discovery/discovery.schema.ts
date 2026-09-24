@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const leadDiscoveryQuerySchema = z.object({
-  campaignId: z.string().uuid('Valid campaign ID is required'),
+  campaignId: z.string().uuid('Valid campaign ID is required').optional(),
   niche: z.string().min(1, 'Niche is required').max(100),
   location: z.string().min(1, 'Location is required').max(100),
   limit: z.coerce.number().int().positive().max(50).default(10),

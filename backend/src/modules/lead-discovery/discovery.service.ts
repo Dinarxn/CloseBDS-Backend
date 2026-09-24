@@ -132,8 +132,8 @@ export class DiscoveryDomainService {
         workspaceId,
         userId,
         eventType: 'lead_discovery:executed',
-        entityType: 'Campaign',
-        entityId: query.campaignId,
+        entityType: query.campaignId ? 'Campaign' : 'Workspace',
+        entityId: query.campaignId ?? workspaceId,
         metadata: {
           niche: query.niche,
           location: query.location,

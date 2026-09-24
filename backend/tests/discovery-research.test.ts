@@ -57,12 +57,12 @@ async function runDiscoveryResearchTests() {
         }
         return null;
       },
-      create: async ({ data }: { data: { workspaceId: string; campaignId: string; businessName: string; domain?: string; phone?: string; address?: string; status?: LeadStatus } }) => {
+      create: async ({ data }: { data: { workspaceId: string; campaignId?: string; businessName: string; domain?: string; phone?: string; address?: string; status?: LeadStatus } }) => {
         const id = `lead_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
         const lead: Lead = {
           id,
           workspaceId: data.workspaceId,
-          campaignId: data.campaignId,
+          campaignId: data.campaignId || null,
           businessName: data.businessName,
           domain: data.domain || null,
           phone: data.phone || null,
@@ -257,7 +257,27 @@ async function runDiscoveryResearchTests() {
       limit: 10,
     });
     assert.equal(res3.persistedCount, 2);
-    console.log('✓ Discovery normalization, persistence, deduplication, and tenant isolation passed');
+
+    // Verify audit log for campaign-backed discovery uses Campaign entity
+    const campaignAudit = auditLogsStore.find(
+      (log) => log.eventType === 'lead_discovery:executed' && log.entityType === 'Campaign'
+    );
+    assert.ok(campaignAudit, 'Audit log with entityType Campaign should exist');
+    assert.equal(campaignAudit.entityId, campaignId);
+
+    // Campaign-less discovery (no campaignId provided) -> executes successfully with Workspace audit
+    const resNoCampaign = await activeDiscovery.executeDiscovery(workspaceA, 'user_a', {
+      niche: 'Dentistry',
+      location: 'Leeds, UK',
+      limit: 10,
+    });
+    assert.equal(resNoCampaign.status, 'completed');
+    const workspaceAudit = auditLogsStore.find(
+      (log) => log.eventType === 'lead_discovery:executed' && log.entityType === 'Workspace'
+    );
+    assert.ok(workspaceAudit, 'Audit log with entityType Workspace should exist for campaign-less discovery');
+    assert.equal(workspaceAudit.entityId, workspaceA);
+    console.log('✓ Discovery normalization, persistence, deduplication, tenant isolation, and campaign-optional audit passed');
 
     // --------------------------------------------------------------------------
     // 3. Lead Research & Website Audit
@@ -355,6 +375,22 @@ async function runDiscoveryResearchTests() {
     assert.equal(authDiscovery.statusCode, 200);
     const discBody = JSON.parse(authDiscovery.payload);
     assert.equal(discBody.status, 'unavailable');
+
+    // Authenticated discovery query containing only niche + location + limit (UI discovery format)
+    const campaignlessDiscovery = await app.inject({
+      method: 'POST',
+      url: '/api/v1/lead-discovery/query',
+      headers: { authorization: `Bearer ${tokenA}` },
+      payload: {
+        niche: 'dentist',
+        location: 'london',
+        limit: 10,
+      },
+    });
+    assert.equal(campaignlessDiscovery.statusCode, 200);
+    const campaignlessBody = JSON.parse(campaignlessDiscovery.payload);
+    assert.equal(campaignlessBody.success, true);
+    assert.equal(campaignlessBody.status, 'unavailable');
 
     // Authenticated get audit
     const getAuditRes = await app.inject({
