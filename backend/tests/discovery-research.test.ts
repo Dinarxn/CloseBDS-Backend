@@ -28,6 +28,7 @@ import type {
 import type { AIService, AuditResult } from '../src/integrations/ai/index.js';
 import { ProviderError } from '../src/integrations/core/provider.types.js';
 import { StandardDiscoveryAdapter } from '../src/integrations/lead-discovery/discovery.adapter.js';
+import { runGeoapifyDiscoveryTests } from './geoapify-discovery.test.js';
 
 async function runDiscoveryResearchTests() {
   console.log('\n--- Starting closeVDS Discovery & Research Domain Tests ---');
@@ -173,8 +174,57 @@ async function runDiscoveryResearchTests() {
         leadsStore.set(where.id, updated);
         return updated;
       },
+      findMany: async ({ where }: { where: { workspaceId?: string; domain?: any; phone?: any; address?: any; businessName?: any } }) => {
+        const results: Lead[] = [];
+        for (const lead of leadsStore.values()) {
+          if (where.workspaceId && lead.workspaceId !== where.workspaceId) continue;
+          if (where.domain) {
+            const domVal = typeof where.domain === 'object' && where.domain?.equals ? where.domain.equals : where.domain;
+            if (domVal && lead.domain?.toLowerCase() !== String(domVal).toLowerCase()) continue;
+          }
+          if (where.phone && typeof where.phone === 'object' && 'not' in where.phone) {
+            if (where.phone.not === null && !lead.phone) continue;
+          }
+          if (where.address && typeof where.address === 'object' && 'not' in where.address) {
+            if (where.address.not === null && !lead.address) continue;
+          }
+          if (where.businessName) {
+            const bizVal = typeof where.businessName === 'object' && where.businessName?.equals ? where.businessName.equals : where.businessName;
+            if (bizVal && lead.businessName.toLowerCase() !== String(bizVal).toLowerCase()) continue;
+          }
+          results.push(lead);
+        }
+        return results;
+      },
     },
     leadSource: {
+      findFirst: async ({ where }: { where: { leadId?: string } }) => {
+        if (!where.leadId) return null;
+        return leadSourcesStore.get(where.leadId) || null;
+      },
+      create: async ({ data }: { data: { leadId: string; provider: string; externalId: string; queryPayload?: unknown } }) => {
+        const entry: LeadSource = {
+          id: `src_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          leadId: data.leadId,
+          provider: data.provider,
+          externalId: data.externalId,
+          queryPayload: (data.queryPayload || null) as never,
+          createdAt: new Date(),
+        };
+        leadSourcesStore.set(data.leadId, entry);
+        return entry;
+      },
+      update: async ({ where, data }: { where: { leadId: string }; data: { queryPayload?: unknown; provider?: string; externalId?: string } }) => {
+        const existing = leadSourcesStore.get(where.leadId);
+        if (!existing) throw new Error('LeadSource not found');
+        const updated: LeadSource = {
+          ...existing,
+          ...data,
+          queryPayload: data.queryPayload !== undefined ? (data.queryPayload as never) : existing.queryPayload,
+        };
+        leadSourcesStore.set(where.leadId, updated);
+        return updated;
+      },
       upsert: async ({ where, update, create }: { where: { leadId: string }; update: Record<string, unknown>; create: Record<string, unknown> }) => {
         const existing = leadSourcesStore.get(where.leadId);
         const data = existing ? { ...existing, ...update } : create;
@@ -595,6 +645,323 @@ async function runDiscoveryResearchTests() {
 
     await app.close();
     console.log('✓ Fastify Discovery and Research HTTP endpoints passed');
+
+    // --------------------------------------------------------------------------
+    // 5. Hierarchical Deduplication & LeadSource Preservation (Tests 1-10)
+    // --------------------------------------------------------------------------
+    console.log('\n--- Testing Hierarchical Deduplication & LeadSource Preservation ---');
+
+    // Test 1: Exact duplicate (same businessName, domain, phone, address)
+    console.log('Test 1: Exact duplicate...');
+    const test1ProviderA: LeadDiscoveryService = {
+      async discoverCandidates(): Promise<RawLeadCandidate[]> {
+        return [{
+          rawId: 'exact_1',
+          rawName: 'Alpha Dental Care',
+          rawAddress: '10 High Street, London',
+          rawPhone: '+442071112222',
+          rawWebsite: 'https://alphadental.co.uk',
+        }];
+      },
+      normalizeCandidate(raw: RawLeadCandidate): NormalizedLeadCandidate {
+        return {
+          businessName: raw.rawName,
+          normalizedAddress: raw.rawAddress,
+          normalizedPhone: raw.rawPhone,
+          domain: 'alphadental.co.uk',
+          sourceProvider: 'OpenStreetMap',
+          sourceExternalId: raw.rawId,
+        };
+      },
+    };
+
+    const dedupService1 = new DiscoveryDomainService(test1ProviderA, testLeadRepo, testLeadSourceRepo, testAuditRepo);
+    const r1Initial = await dedupService1.executeDiscovery(workspaceA, 'user_a', {
+      campaignId, niche: 'Dentist', location: 'London', limit: 10,
+    });
+    assert.equal(r1Initial.persistedCount, 1);
+    assert.equal(r1Initial.skippedDuplicateCount, 0);
+
+    const r1Duplicate = await dedupService1.executeDiscovery(workspaceA, 'user_a', {
+      campaignId, niche: 'Dentist', location: 'London', limit: 10,
+    });
+    assert.equal(r1Duplicate.persistedCount, 0);
+    assert.equal(r1Duplicate.skippedDuplicateCount, 1);
+    console.log('✓ Test 1 Passed: Exact duplicate correctly identified and skipped');
+
+    // Test 2: OSM incomplete -> Geoapify complete (Enrichment + Source Preservation)
+    console.log('Test 2: OSM incomplete -> Geoapify complete...');
+    const test2OSMProvider: LeadDiscoveryService = {
+      async discoverCandidates(): Promise<RawLeadCandidate[]> {
+        return [{
+          rawId: 'osm_node_2001',
+          rawName: 'Beta Dental Clinic',
+          rawAddress: '25 Baker Street, London',
+        }];
+      },
+      normalizeCandidate(raw: RawLeadCandidate): NormalizedLeadCandidate {
+        return {
+          businessName: raw.rawName,
+          normalizedAddress: raw.rawAddress,
+          domain: undefined,
+          normalizedPhone: undefined,
+          sourceProvider: 'OpenStreetMap',
+          sourceExternalId: raw.rawId,
+        };
+      },
+    };
+    const dedupService2OSM = new DiscoveryDomainService(test2OSMProvider, testLeadRepo, testLeadSourceRepo, testAuditRepo);
+    const r2OSM = await dedupService2OSM.executeDiscovery(workspaceA, 'user_a', {
+      campaignId, niche: 'Dentist', location: 'London', limit: 10,
+    });
+    assert.equal(r2OSM.persistedCount, 1);
+
+    const test2GeoapifyProvider: LeadDiscoveryService = {
+      async discoverCandidates(): Promise<RawLeadCandidate[]> {
+        return [{
+          rawId: 'geoapify_2002',
+          rawName: 'Beta Dental Clinic',
+          rawAddress: '25 Baker Street, London',
+          rawPhone: '+442079998888',
+          rawWebsite: 'https://betadental.co.uk',
+        }];
+      },
+      normalizeCandidate(raw: RawLeadCandidate): NormalizedLeadCandidate {
+        return {
+          businessName: raw.rawName,
+          normalizedAddress: raw.rawAddress,
+          domain: 'betadental.co.uk',
+          normalizedPhone: '+442079998888',
+          sourceProvider: 'Geoapify',
+          sourceExternalId: raw.rawId,
+        };
+      },
+    };
+    const dedupService2Geo = new DiscoveryDomainService(test2GeoapifyProvider, testLeadRepo, testLeadSourceRepo, testAuditRepo);
+    const r2Geo = await dedupService2Geo.executeDiscovery(workspaceA, 'user_a', {
+      campaignId, niche: 'Dentist', location: 'London', limit: 10,
+    });
+    assert.equal(r2Geo.persistedCount, 0);
+    assert.equal(r2Geo.skippedDuplicateCount, 1);
+
+    const enrichedLead = await testLeadRepo.findExistingLeadForDiscovery(workspaceA, {
+      businessName: 'Beta Dental Clinic',
+      domain: 'betadental.co.uk',
+    });
+    assert.ok(enrichedLead);
+    assert.equal(enrichedLead.domain, 'betadental.co.uk');
+    assert.equal(enrichedLead.phone, '+442079998888');
+
+    const betaSource = await testLeadSourceRepo.findByLeadId(enrichedLead.id, workspaceA);
+    assert.ok(betaSource);
+    assert.equal(betaSource.provider, 'OpenStreetMap', 'Primary provider must remain OpenStreetMap');
+    assert.equal(betaSource.externalId, 'osm_node_2001', 'Primary externalId must remain intact');
+    const betaPayload = betaSource.queryPayload as Record<string, unknown>;
+    assert.ok(Array.isArray(betaPayload.additionalSources));
+    assert.equal((betaPayload.additionalSources as any[])[0].provider, 'Geoapify');
+    assert.equal((betaPayload.additionalSources as any[])[0].externalId, 'geoapify_2002');
+    console.log('✓ Test 2 Passed: OSM incomplete -> Geoapify complete safely enriched and sources preserved');
+
+    // Test 3: Same domain with corroboration
+    console.log('Test 3: Same domain with corroboration...');
+    const test3ProviderA: LeadDiscoveryService = {
+      async discoverCandidates(): Promise<RawLeadCandidate[]> {
+        return [{
+          rawId: 'osm_3001',
+          rawName: 'Gamma Dental',
+          rawWebsite: 'https://gammadental.com',
+        }];
+      },
+      normalizeCandidate(raw: RawLeadCandidate): NormalizedLeadCandidate {
+        return {
+          businessName: raw.rawName,
+          domain: 'gammadental.com',
+          sourceProvider: 'OpenStreetMap',
+          sourceExternalId: raw.rawId,
+        };
+      },
+    };
+    const dedupService3 = new DiscoveryDomainService(test3ProviderA, testLeadRepo, testLeadSourceRepo, testAuditRepo);
+    await dedupService3.executeDiscovery(workspaceA, 'user_a', {
+      campaignId, niche: 'Dentist', location: 'London', limit: 10,
+    });
+
+    const matchedDomainLead = await testLeadRepo.findExistingLeadForDiscovery(workspaceA, {
+      businessName: 'Gamma Dental London',
+      domain: 'gammadental.com',
+    });
+    assert.ok(matchedDomainLead);
+    assert.equal(matchedDomainLead.businessName, 'Gamma Dental');
+    console.log('✓ Test 3 Passed: Same domain with corroboration safely matched existing lead');
+
+    // Test 4: Phone + name (with formatting differences)
+    console.log('Test 4: Phone + name match...');
+    const test4ProviderA: LeadDiscoveryService = {
+      async discoverCandidates(): Promise<RawLeadCandidate[]> {
+        return [{
+          rawId: 'osm_4001',
+          rawName: 'Delta Smiles Practice',
+          rawPhone: '+44 20 7123 4567',
+        }];
+      },
+      normalizeCandidate(raw: RawLeadCandidate): NormalizedLeadCandidate {
+        return {
+          businessName: raw.rawName,
+          normalizedPhone: '+44 20 7123 4567',
+          sourceProvider: 'OpenStreetMap',
+          sourceExternalId: raw.rawId,
+        };
+      },
+    };
+    const dedupService4 = new DiscoveryDomainService(test4ProviderA, testLeadRepo, testLeadSourceRepo, testAuditRepo);
+    await dedupService4.executeDiscovery(workspaceA, 'user_a', {
+      campaignId, niche: 'Dentist', location: 'London', limit: 10,
+    });
+
+    const matchedPhoneLead = await testLeadRepo.findExistingLeadForDiscovery(workspaceA, {
+      businessName: 'delta smiles practice',
+      phone: '+442071234567',
+    });
+    assert.ok(matchedPhoneLead);
+    assert.equal(matchedPhoneLead.businessName, 'Delta Smiles Practice');
+    console.log('✓ Test 4 Passed: Phone + name variation matched successfully');
+
+    // Test 5: Name + address fallback
+    console.log('Test 5: Name + address fallback...');
+    const test5ProviderA: LeadDiscoveryService = {
+      async discoverCandidates(): Promise<RawLeadCandidate[]> {
+        return [{
+          rawId: 'osm_5001',
+          rawName: 'Epsilon Dental Suite',
+          rawAddress: '100 Fleet Street, London, EC4A 2AB',
+        }];
+      },
+      normalizeCandidate(raw: RawLeadCandidate): NormalizedLeadCandidate {
+        return {
+          businessName: raw.rawName,
+          normalizedAddress: raw.rawAddress,
+          sourceProvider: 'OpenStreetMap',
+          sourceExternalId: raw.rawId,
+        };
+      },
+    };
+    const dedupService5 = new DiscoveryDomainService(test5ProviderA, testLeadRepo, testLeadSourceRepo, testAuditRepo);
+    await dedupService5.executeDiscovery(workspaceA, 'user_a', {
+      campaignId, niche: 'Dentist', location: 'London', limit: 10,
+    });
+
+    const matchedAddressLead = await testLeadRepo.findExistingLeadForDiscovery(workspaceA, {
+      businessName: 'Epsilon Dental Suite',
+      address: '100 Fleet Street, London',
+    });
+    assert.ok(matchedAddressLead);
+    assert.equal(matchedAddressLead.businessName, 'Epsilon Dental Suite');
+    console.log('✓ Test 5 Passed: Name + address fallback matched successfully');
+
+    // Test 6: Different businesses (do not over-deduplicate)
+    console.log('Test 6: Different businesses...');
+    await testLeadRepo.create({
+      workspaceId: workspaceA,
+      businessName: 'Apex Dental',
+      domain: 'apexdental-ny.com',
+      phone: '+12125550100',
+      address: '100 Broadway, New York',
+      status: 'NEW',
+    });
+
+    const matchedDiff = await testLeadRepo.findExistingLeadForDiscovery(workspaceA, {
+      businessName: 'Apex Dental',
+      domain: 'apexdental-la.com',
+      phone: '+13105550200',
+      address: '200 Sunset Blvd, Los Angeles',
+    });
+    assert.equal(matchedDiff, null, 'Different businesses with same name but different domain/phone/address must not be merged');
+    console.log('✓ Test 6 Passed: Different businesses are not over-deduplicated');
+
+    // Test 7: LeadSource preservation (primary intact, additional source appended)
+    console.log('Test 7: LeadSource preservation...');
+    const test7Lead = await testLeadRepo.create({
+      workspaceId: workspaceA,
+      businessName: 'Preservation Dental',
+      domain: 'preservationdental.com',
+      status: 'NEW',
+    });
+    await testLeadSourceRepo.recordDiscoverySource(test7Lead.id, workspaceA, {
+      provider: 'OpenStreetMap',
+      externalId: 'osm_initial_700',
+      queryPayload: { initialQuery: 'osm query' },
+    });
+
+    // Record second source from Geoapify
+    await testLeadSourceRepo.recordDiscoverySource(test7Lead.id, workspaceA, {
+      provider: 'Geoapify',
+      externalId: 'geoapify_701',
+    });
+
+    const sourceAfterGeo = await testLeadSourceRepo.findByLeadId(test7Lead.id, workspaceA);
+    assert.ok(sourceAfterGeo);
+    assert.equal(sourceAfterGeo.provider, 'OpenStreetMap', 'Primary provider must remain OpenStreetMap');
+    assert.equal(sourceAfterGeo.externalId, 'osm_initial_700', 'Primary externalId must remain intact');
+    const payloadAfterGeo = sourceAfterGeo.queryPayload as Record<string, unknown>;
+    assert.equal(payloadAfterGeo.initialQuery, 'osm query', 'Existing queryPayload fields must be preserved');
+    assert.equal((payloadAfterGeo.additionalSources as any[])[0].provider, 'Geoapify');
+    assert.equal((payloadAfterGeo.additionalSources as any[])[0].externalId, 'geoapify_701');
+    console.log('✓ Test 7 Passed: Primary LeadSource intact and additional source appended');
+
+    // Test 8: Multiple providers (OSM -> Geoapify -> GooglePlaces)
+    console.log('Test 8: Multiple providers coexist...');
+    await testLeadSourceRepo.recordDiscoverySource(test7Lead.id, workspaceA, {
+      provider: 'GooglePlaces',
+      externalId: 'ChIJ_google_702',
+    });
+
+    const sourceMulti = await testLeadSourceRepo.findByLeadId(test7Lead.id, workspaceA);
+    assert.ok(sourceMulti);
+    assert.equal(sourceMulti.provider, 'OpenStreetMap');
+    const multiPayload = sourceMulti.queryPayload as Record<string, unknown>;
+    const addlList = multiPayload.additionalSources as any[];
+    assert.equal(addlList.length, 2);
+    assert.equal(addlList[0].provider, 'Geoapify');
+    assert.equal(addlList[1].provider, 'GooglePlaces');
+    assert.equal(addlList[1].externalId, 'ChIJ_google_702');
+    console.log('✓ Test 8 Passed: Multiple providers coexist cleanly in additionalSources');
+
+    // Test 9: No duplicate additional sources
+    console.log('Test 9: No duplicate additional source...');
+    await testLeadSourceRepo.recordDiscoverySource(test7Lead.id, workspaceA, {
+      provider: 'Geoapify',
+      externalId: 'geoapify_701',
+    });
+
+    const sourceNoDup = await testLeadSourceRepo.findByLeadId(test7Lead.id, workspaceA);
+    const noDupList = (sourceNoDup?.queryPayload as any).additionalSources as any[];
+    assert.equal(noDupList.length, 2, 'Must not duplicate existing additional source entry');
+    console.log('✓ Test 9 Passed: Duplicate additional sources are prevented');
+
+    // Test 10: Workspace isolation
+    console.log('Test 10: Workspace isolation...');
+    const wsALead = await testLeadRepo.create({
+      workspaceId: workspaceA,
+      businessName: 'Zeta Clinic',
+      domain: 'zetaclinic.com',
+      status: 'NEW',
+    });
+
+    const wsBCheck = await testLeadRepo.findExistingLeadForDiscovery(workspaceB, {
+      businessName: 'Zeta Clinic',
+      domain: 'zetaclinic.com',
+    });
+    assert.equal(wsBCheck, null, 'Must never deduplicate across workspaces');
+
+    const wsBLead = await testLeadRepo.create({
+      workspaceId: workspaceB,
+      businessName: 'Zeta Clinic',
+      domain: 'zetaclinic.com',
+      status: 'NEW',
+    });
+    assert.notEqual(wsALead.id, wsBLead.id, 'Leads in different workspaces must have separate records');
+    console.log('✓ Test 10 Passed: Workspace isolation strictly preserved');
+
     console.log('\n--- All Discovery & Research Tests Passed Successfully ---');
   } finally {
     globalThis.fetch = originalFetch;
@@ -602,7 +969,9 @@ async function runDiscoveryResearchTests() {
   }
 }
 
-runDiscoveryResearchTests().catch((err) => {
-  console.error('Discovery & Research Test Suite Failed:', err);
-  process.exit(1);
-});
+runDiscoveryResearchTests()
+  .then(() => runGeoapifyDiscoveryTests())
+  .catch((err) => {
+    console.error('Discovery & Research Test Suite Failed:', err);
+    process.exit(1);
+  });

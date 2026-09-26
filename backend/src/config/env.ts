@@ -53,6 +53,9 @@ const envSchema = z
     CLOSEBDS_API_KEY: z.string().optional(),
     CLOSEBDS_BASE_URL: z.string().optional(),
 
+    // Lead Discovery Provider Secrets
+    GEOAPIFY_API_KEY: z.string().optional(),
+
     // AI & LLM Provider Configuration
     GEMINI_API_KEY: z.string().optional(),
     GEMINI_MODEL: z.string().default('gemini-3.6-flash'),

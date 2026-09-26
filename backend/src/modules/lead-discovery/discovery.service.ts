@@ -4,6 +4,7 @@ import type {
   RawLeadCandidate,
 } from '../../integrations/lead-discovery/index.js';
 import { StandardDiscoveryAdapter } from '../../integrations/lead-discovery/discovery.adapter.js';
+import { GeoapifyDiscoveryAdapter } from '../../integrations/lead-discovery/geoapify.adapter.js';
 import {
   LeadRepository,
   LeadSourceRepository,
@@ -44,13 +45,44 @@ export interface CloseBDSImportResult {
 }
 
 export class DiscoveryDomainService {
+  private providers: Map<string, LeadDiscoveryService> = new Map();
+
   constructor(
-    private provider?: LeadDiscoveryService,
+    providerOrMap?:
+      | LeadDiscoveryService
+      | Map<string, LeadDiscoveryService>
+      | Record<string, LeadDiscoveryService>,
     private leadRepo: LeadRepository = defaultLeadRepo,
     private leadSourceRepo: LeadSourceRepository = defaultLeadSourceRepo,
     private auditRepo: AuditRepository = defaultAuditRepo,
     private db: DatabaseClient = databaseClient
-  ) {}
+  ) {
+    if (providerOrMap instanceof Map) {
+      this.providers = new Map(providerOrMap);
+    } else if (
+      providerOrMap &&
+      typeof providerOrMap === 'object' &&
+      !('discoverCandidates' in providerOrMap)
+    ) {
+      for (const [key, p] of Object.entries(providerOrMap)) {
+        if (p) {
+          this.providers.set(key.toLowerCase().trim(), p);
+        }
+      }
+    } else if (providerOrMap) {
+      this.providers.set('osm', providerOrMap as LeadDiscoveryService);
+      this.providers.set('default', providerOrMap as LeadDiscoveryService);
+    }
+  }
+
+  public registerProvider(name: string, provider: LeadDiscoveryService): void {
+    this.providers.set(name.toLowerCase().trim(), provider);
+  }
+
+  public getProvider(name?: string): LeadDiscoveryService | undefined {
+    const key = (name || 'osm').toLowerCase().trim();
+    return this.providers.get(key) || (key === 'osm' ? this.providers.get('default') : undefined);
+  }
 
   private get prisma(): PrismaClient {
     return this.db.getPrismaClient();
@@ -65,10 +97,27 @@ export class DiscoveryDomainService {
     userId: string | undefined,
     query: LeadDiscoveryQueryInput
   ): Promise<DiscoveryExecutionResult> {
-    if (!this.provider) {
+    const selectedProviderKey = (query.provider || query.source || 'osm').toLowerCase().trim();
+
+    if (selectedProviderKey === 'google') {
       return {
         status: 'unavailable',
-        message: 'Lead discovery provider is not configured in this environment',
+        message: 'Google Places provider is currently disabled/unsupported',
+        discoveredCount: 0,
+        persistedCount: 0,
+        skippedDuplicateCount: 0,
+      };
+    }
+
+    const provider = this.getProvider(selectedProviderKey);
+    if (!provider) {
+      const msg =
+        selectedProviderKey === 'osm'
+          ? 'Lead discovery provider is not configured in this environment'
+          : `Lead discovery provider '${selectedProviderKey}' is not configured in this environment`;
+      return {
+        status: 'unavailable',
+        message: msg,
         discoveredCount: 0,
         persistedCount: 0,
         skippedDuplicateCount: 0,
@@ -77,7 +126,7 @@ export class DiscoveryDomainService {
 
     let rawCandidates: RawLeadCandidate[] = [];
     try {
-      rawCandidates = await this.provider.discoverCandidates({
+      rawCandidates = await provider.discoverCandidates({
         niche: query.niche,
         location: query.location,
         limit: query.limit,
@@ -98,20 +147,47 @@ export class DiscoveryDomainService {
     const normalizedList: NormalizedLeadCandidate[] = [];
 
     for (const raw of rawCandidates) {
-      const normalized = this.provider.normalizeCandidate(raw);
+      const normalized = provider.normalizeCandidate(raw);
       normalizedList.push(normalized);
 
-      // Check match-key deduplication before persisting
-      const existing = await this.leadRepo.findByMatchKey(
-        workspaceId,
-        normalized.businessName,
-        normalized.domain,
-        normalized.normalizedPhone,
-        normalized.normalizedAddress
-      );
+      // Conservative hierarchical deduplication across providers
+      const existing = await this.leadRepo.findExistingLeadForDiscovery(workspaceId, {
+        businessName: normalized.businessName,
+        domain: normalized.domain,
+        phone: normalized.normalizedPhone,
+        address: normalized.normalizedAddress,
+      });
 
       if (existing) {
         skippedDuplicateCount++;
+
+        // Conservative enrichment: only enrich missing/null fields on existing lead
+        const enrichData: { domain?: string; phone?: string; address?: string } = {};
+        if (!existing.domain && normalized.domain) {
+          enrichData.domain = normalized.domain;
+        }
+        if (!existing.phone && normalized.normalizedPhone) {
+          enrichData.phone = normalized.normalizedPhone;
+        }
+        if (!existing.address && normalized.normalizedAddress) {
+          enrichData.address = normalized.normalizedAddress;
+        }
+
+        if (Object.keys(enrichData).length > 0) {
+          await this.leadRepo.update(existing.id, workspaceId, enrichData);
+          Object.assign(existing, enrichData);
+        }
+
+        // Preserve primary LeadSource and record additional provider source
+        await this.leadSourceRepo.recordDiscoverySource(existing.id, workspaceId, {
+          provider: normalized.sourceProvider,
+          externalId: normalized.sourceExternalId,
+          queryPayload: {
+            niche: query.niche,
+            location: query.location,
+          },
+        });
+
         continue;
       }
 
@@ -126,9 +202,8 @@ export class DiscoveryDomainService {
         status: 'NEW',
       });
 
-      // Persist lead source tracking metadata
-      await this.leadSourceRepo.upsert(lead.id, workspaceId, {
-        leadId: lead.id,
+      // Persist primary lead source tracking metadata
+      await this.leadSourceRepo.recordDiscoverySource(lead.id, workspaceId, {
         provider: normalized.sourceProvider,
         externalId: normalized.sourceExternalId,
         queryPayload: {
@@ -150,6 +225,7 @@ export class DiscoveryDomainService {
         metadata: {
           niche: query.niche,
           location: query.location,
+          provider: selectedProviderKey,
           discovered: rawCandidates.length,
           persisted: persistedCount,
           skippedDuplicates: skippedDuplicateCount,
@@ -334,9 +410,8 @@ export class DiscoveryDomainService {
       );
 
       if (matchedLead) {
-        // Link LeadSource to existing lead without creating a duplicate Lead row
-        await this.leadSourceRepo.upsert(matchedLead.id, workspaceId, {
-          leadId: matchedLead.id,
+        // Link LeadSource to existing lead without overwriting primary provider
+        await this.leadSourceRepo.recordDiscoverySource(matchedLead.id, workspaceId, {
           provider: 'closeBDS',
           externalId,
           queryPayload: (item.metadata || undefined) as Record<string, unknown> | undefined,
@@ -459,6 +534,7 @@ export class DiscoveryDomainService {
   }
 }
 
-export const discoveryDomainService = new DiscoveryDomainService(
-  new StandardDiscoveryAdapter()
-);
+export const discoveryDomainService = new DiscoveryDomainService({
+  osm: new StandardDiscoveryAdapter(),
+  geoapify: new GeoapifyDiscoveryAdapter(),
+});

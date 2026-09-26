@@ -364,6 +364,77 @@ export interface UpdateContactInput {
   isPrimary?: boolean;
 }
 
+export interface DiscoveryLeadCandidateInput {
+  businessName: string;
+  domain?: string | null;
+  phone?: string | null;
+  address?: string | null;
+}
+
+const GENERIC_DISCOVERY_DOMAINS = new Set([
+  'facebook.com',
+  'instagram.com',
+  'twitter.com',
+  'x.com',
+  'linkedin.com',
+  'youtube.com',
+  'tiktok.com',
+  'linktr.ee',
+  'google.com',
+  'maps.google.com',
+  'yelp.com',
+  'tripadvisor.com',
+  'wix.com',
+  'squarespace.com',
+  'wordpress.com',
+  'github.io',
+  'gmail.com',
+  'yahoo.com',
+  'hotmail.com',
+  'outlook.com',
+]);
+
+export function normalizeDiscoveryDomain(domain?: string | null): string | null {
+  if (!domain || typeof domain !== 'string') return null;
+  const clean = domain
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .replace(/\/+$/, '')
+    .split('/')[0]
+    .split(':')[0];
+  if (clean.length < 4 || clean.includes(' ') || !clean.includes('.')) return null;
+  if (GENERIC_DISCOVERY_DOMAINS.has(clean)) return null;
+  return clean;
+}
+
+export function normalizeDiscoveryPhone(phone?: string | null): string | null {
+  if (!phone || typeof phone !== 'string') return null;
+  const digits = phone.replace(/[^\d]/g, '');
+  if (digits.length < 7) return null;
+  return digits;
+}
+
+export function normalizeDiscoveryName(name: string): string {
+  if (!name || typeof name !== 'string') return '';
+  return name
+    .toLowerCase()
+    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()'"?]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function normalizeDiscoveryAddress(address?: string | null): string | null {
+  if (!address || typeof address !== 'string') return null;
+  const clean = address
+    .toLowerCase()
+    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()'"?]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return clean.length >= 3 ? clean : null;
+}
+
 export class LeadRepository implements BaseRepository<Lead> {
   constructor(private db: DatabaseClient = databaseClient) {}
 
@@ -402,6 +473,156 @@ export class LeadRepository implements BaseRepository<Lead> {
         address: address ?? null,
       },
     });
+  }
+
+  /**
+   * Conservative hierarchical deduplication for lead discovery across multiple providers.
+   * Scoped strictly to the provided workspaceId.
+   *
+   * Tiers:
+   * 0. Fast-path: Exact 5-factor match key (businessName, domain, phone, address).
+   * 1. Strong domain match with corroboration (normalized business name or phone or address).
+   * 2. Phone + Business Name match (normalized phone digits + case-insensitive business name).
+   * 3. Business Name + Address fallback (normalized business name + address).
+   */
+  async findExistingLeadForDiscovery(
+    workspaceId: string,
+    candidate: DiscoveryLeadCandidateInput
+  ): Promise<Lead | null> {
+    const rawBizName = candidate.businessName?.trim();
+    if (!rawBizName) {
+      return null;
+    }
+
+    // Tier 0: Exact match check
+    const exactMatch = await this.findByMatchKey(
+      workspaceId,
+      rawBizName,
+      candidate.domain || undefined,
+      candidate.phone || undefined,
+      candidate.address || undefined
+    );
+    if (exactMatch) {
+      return exactMatch;
+    }
+
+    const normName = normalizeDiscoveryName(rawBizName);
+    const normDomain = normalizeDiscoveryDomain(candidate.domain);
+    const normPhone = normalizeDiscoveryPhone(candidate.phone);
+    const normAddress = normalizeDiscoveryAddress(candidate.address);
+
+    // Tier 1: Strong domain match with corroborating signal
+    if (normDomain) {
+      const candidatesByDomain = await this.prisma.lead.findMany({
+        where: {
+          workspaceId,
+          domain: { equals: normDomain, mode: 'insensitive' },
+        },
+      });
+
+      for (const existing of candidatesByDomain) {
+        const existNameNorm = normalizeDiscoveryName(existing.businessName);
+        const nameCorroborated =
+          existNameNorm === normName ||
+          existNameNorm.includes(normName) ||
+          normName.includes(existNameNorm);
+
+        // Corroboration by name similarity
+        if (nameCorroborated) {
+          return existing;
+        }
+
+        // Corroboration by phone
+        if (normPhone && existing.phone) {
+          const existPhoneNorm = normalizeDiscoveryPhone(existing.phone);
+          if (
+            existPhoneNorm &&
+            (existPhoneNorm === normPhone ||
+              existPhoneNorm.endsWith(normPhone.slice(-8)) ||
+              normPhone.endsWith(existPhoneNorm.slice(-8)))
+          ) {
+            return existing;
+          }
+        }
+
+        // Corroboration by address
+        if (normAddress && existing.address) {
+          const existAddrNorm = normalizeDiscoveryAddress(existing.address);
+          if (
+            existAddrNorm &&
+            (existAddrNorm === normAddress ||
+              existAddrNorm.includes(normAddress) ||
+              normAddress.includes(existAddrNorm))
+          ) {
+            return existing;
+          }
+        }
+      }
+    }
+
+    // Tier 2: Phone + Business Name match
+    if (normPhone) {
+      const candidatesWithPhone = await this.prisma.lead.findMany({
+        where: {
+          workspaceId,
+          phone: { not: null },
+        },
+      });
+
+      for (const existing of candidatesWithPhone) {
+        if (!existing.phone) continue;
+        const existPhoneNorm = normalizeDiscoveryPhone(existing.phone);
+        const phoneMatches =
+          existPhoneNorm &&
+          (existPhoneNorm === normPhone ||
+            existPhoneNorm.endsWith(normPhone.slice(-8)) ||
+            normPhone.endsWith(existPhoneNorm.slice(-8)));
+
+        if (phoneMatches) {
+          const existNameNorm = normalizeDiscoveryName(existing.businessName);
+          if (
+            existNameNorm === normName ||
+            existNameNorm.includes(normName) ||
+            normName.includes(existNameNorm)
+          ) {
+            return existing;
+          }
+        }
+      }
+    }
+
+    // Tier 3: Business Name + Address fallback
+    if (normAddress && normName) {
+      const candidatesWithAddress = await this.prisma.lead.findMany({
+        where: {
+          workspaceId,
+          address: { not: null },
+        },
+      });
+
+      for (const existing of candidatesWithAddress) {
+        if (!existing.address) continue;
+        const existNameNorm = normalizeDiscoveryName(existing.businessName);
+        const nameMatches =
+          existNameNorm === normName ||
+          existNameNorm.includes(normName) ||
+          normName.includes(existNameNorm);
+
+        if (nameMatches) {
+          const existAddrNorm = normalizeDiscoveryAddress(existing.address);
+          if (
+            existAddrNorm &&
+            (existAddrNorm === normAddress ||
+              existAddrNorm.includes(normAddress) ||
+              normAddress.includes(existAddrNorm))
+          ) {
+            return existing;
+          }
+        }
+      }
+    }
+
+    return null;
   }
 
   async findMany(
@@ -806,6 +1027,18 @@ export interface CreateLeadSourceInput {
   queryPayload?: Record<string, unknown>;
 }
 
+export interface AdditionalSourceEntry {
+  provider: string;
+  externalId: string;
+  discoveredAt: string;
+}
+
+export interface RecordDiscoverySourceInput {
+  provider: string;
+  externalId: string;
+  queryPayload?: Record<string, unknown>;
+}
+
 export class LeadSourceRepository {
   constructor(private db: DatabaseClient = databaseClient) {}
 
@@ -843,6 +1076,86 @@ export class LeadSourceRepository {
         queryPayload: data.queryPayload as Prisma.InputJsonValue,
       },
     });
+  }
+
+  /**
+   * Records discovery source while strictly preserving the primary provider identity.
+   * If lead has no LeadSource, creates the primary LeadSource.
+   * If lead already has a LeadSource:
+   *   - If incoming source matches primary provider and externalId, preserves existing.
+   *   - Otherwise, safely merges incoming provider into queryPayload.additionalSources
+   *     without overwriting existing provider, externalId, or other queryPayload properties.
+   *   - Prevents duplicate additional source entries for the same provider + externalId.
+   */
+  async recordDiscoverySource(
+    leadId: string,
+    workspaceId: string,
+    data: RecordDiscoverySourceInput
+  ): Promise<LeadSource> {
+    const lead = await this.prisma.lead.findFirst({
+      where: { id: leadId, workspaceId },
+      include: { leadSource: true },
+    });
+    if (!lead) {
+      throw new NotFoundError('Lead not found or access denied for this workspace');
+    }
+
+    if (!lead.leadSource) {
+      return this.prisma.leadSource.create({
+        data: {
+          leadId,
+          provider: data.provider,
+          externalId: data.externalId,
+          queryPayload: (data.queryPayload || null) as Prisma.InputJsonValue,
+        },
+      });
+    }
+
+    const existingSource = lead.leadSource;
+
+    // If incoming source matches primary provider and externalId exactly, preserve without change
+    if (
+      existingSource.provider === data.provider &&
+      existingSource.externalId === data.externalId
+    ) {
+      return existingSource;
+    }
+
+    // Preserve existing payload and merge into additionalSources safely
+    const currentPayload: Record<string, unknown> =
+      existingSource.queryPayload &&
+      typeof existingSource.queryPayload === 'object' &&
+      !Array.isArray(existingSource.queryPayload)
+        ? { ...(existingSource.queryPayload as Record<string, unknown>) }
+        : {};
+
+    const existingAdditional: AdditionalSourceEntry[] = Array.isArray(
+      currentPayload.additionalSources
+    )
+      ? ([...currentPayload.additionalSources] as AdditionalSourceEntry[])
+      : [];
+
+    const isDuplicate = existingAdditional.some(
+      (s) => s.provider === data.provider && s.externalId === data.externalId
+    );
+
+    if (!isDuplicate) {
+      existingAdditional.push({
+        provider: data.provider,
+        externalId: data.externalId,
+        discoveredAt: new Date().toISOString(),
+      });
+      currentPayload.additionalSources = existingAdditional;
+
+      return this.prisma.leadSource.update({
+        where: { leadId },
+        data: {
+          queryPayload: currentPayload as Prisma.InputJsonValue,
+        },
+      });
+    }
+
+    return existingSource;
   }
 }
 

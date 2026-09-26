@@ -38,3 +38,9 @@ export interface LeadDiscoveryService {
   discoverCandidates(query: LeadDiscoveryQuery): Promise<RawLeadCandidate[]>;
   normalizeCandidate(raw: RawLeadCandidate): NormalizedLeadCandidate;
 }
+
+export {
+  GeoapifyDiscoveryAdapter,
+  type GeoapifyAdapterConfig,
+  NICHE_GEOAPIFY_MAP,
+} from './geoapify.adapter.js';
