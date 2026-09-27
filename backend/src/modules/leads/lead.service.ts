@@ -13,7 +13,9 @@ import type {
   UpdateContactInput,
   LeadQueryInput,
 } from './lead.schema.js';
-import type { Lead, Contact } from '@prisma/client';
+import type { Contact } from '@prisma/client';
+import type { LeadWithDetails } from './lead.types.js';
+import { evaluateServiceOpportunity } from '../qualification/service-opportunity.evaluator.js';
 
 export class LeadService {
   constructor(
@@ -27,25 +29,55 @@ export class LeadService {
   async listLeads(
     workspaceId: string,
     query: LeadQueryInput
-  ): Promise<PaginationResult<Lead & { contacts: Contact[] }>> {
-    return this.leadRepo.findManyPaginated(workspaceId, {
+  ): Promise<PaginationResult<LeadWithDetails>> {
+    const result = await this.leadRepo.findManyPaginated(workspaceId, {
       campaignId: query.campaignId,
       status: query.status,
       search: query.search,
       page: query.page,
       limit: query.limit,
     });
+
+    const data: LeadWithDetails[] = result.data.map((lead) => {
+      const serviceRecommendation = evaluateServiceOpportunity({
+        domain: lead.domain,
+        websiteAudit: (lead as any).websiteAudit,
+        aiAnalysis: (lead as any).aiAnalysis || undefined,
+        leadScore: (lead as any).leadScore || undefined,
+      });
+
+      return {
+        ...lead,
+        serviceRecommendation,
+      };
+    });
+
+    return {
+      ...result,
+      data,
+    };
   }
 
   /**
    * Retrieves single lead by ID scoped to workspace.
    */
-  async getLead(id: string, workspaceId: string): Promise<Lead & { contacts: Contact[] }> {
+  async getLead(id: string, workspaceId: string): Promise<LeadWithDetails> {
     const lead = await this.leadRepo.findById(id, workspaceId);
     if (!lead) {
       throw new NotFoundError('Lead not found or access denied for this workspace');
     }
-    return lead;
+
+    const serviceRecommendation = evaluateServiceOpportunity({
+      domain: lead.domain,
+      websiteAudit: lead.websiteAudit,
+      aiAnalysis: lead.aiAnalysis || undefined,
+      leadScore: lead.leadScore || undefined,
+    });
+
+    return {
+      ...lead,
+      serviceRecommendation,
+    };
   }
 
   /**
@@ -55,7 +87,7 @@ export class LeadService {
     workspaceId: string,
     userId: string | undefined,
     data: CreateLeadInput
-  ): Promise<Lead & { contacts: Contact[] }> {
+  ): Promise<LeadWithDetails> {
     // 1. Deduplication check via 4-factor match key
     const duplicate = await this.leadRepo.findByMatchKey(
       workspaceId,
@@ -113,7 +145,14 @@ export class LeadService {
       // Non-blocking
     }
 
-    return lead;
+    const serviceRecommendation = evaluateServiceOpportunity({
+      domain: lead.domain,
+    });
+
+    return {
+      ...lead,
+      serviceRecommendation,
+    };
   }
 
   /**
@@ -124,7 +163,7 @@ export class LeadService {
     workspaceId: string,
     userId: string | undefined,
     data: UpdateLeadInput
-  ): Promise<Lead> {
+  ): Promise<LeadWithDetails> {
     const updated = await this.leadRepo.update(id, workspaceId, data);
 
     try {
@@ -140,7 +179,14 @@ export class LeadService {
       // Non-blocking audit failure
     }
 
-    return updated;
+    const serviceRecommendation = evaluateServiceOpportunity({
+      domain: updated.domain,
+    });
+
+    return {
+      ...updated,
+      serviceRecommendation,
+    };
   }
 
   /**

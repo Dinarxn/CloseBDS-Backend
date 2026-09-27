@@ -216,6 +216,18 @@ async function runLeadTests() {
     assert.equal(leadA.businessName, 'Apex Dental Care');
     assert.equal(leadA.contacts.length, 1);
     assert.equal(leadA.contacts[0].fullName, 'Dr. John Smith');
+    assert.ok(leadA.serviceRecommendation, 'Lead must include service recommendation');
+
+    // Test lead without domain receives Website Design / Development
+    const noWebsiteLead = await testLeadService.createLead(workspaceA, 'user_a', {
+      campaignId,
+      businessName: 'No Website Dental Practice',
+      phone: '+442079469999',
+    });
+    assert.equal(noWebsiteLead.serviceRecommendation?.hasOpportunity, true);
+    assert.equal(noWebsiteLead.serviceRecommendation?.serviceOpportunity, 'YES');
+    assert.equal(noWebsiteLead.serviceRecommendation?.recommendedService, 'Website Design / Development');
+    assert.equal(noWebsiteLead.serviceRecommendation?.reason, 'No business website found.');
 
     // Attempting duplicate lead creation in same workspace must throw ConflictError
     await assert.rejects(
@@ -329,6 +341,7 @@ async function runLeadTests() {
     const listBody = JSON.parse(listRes.payload);
     assert.equal(listBody.success, true);
     assert.ok(listBody.data.length >= 1);
+    assert.ok(listBody.data[0].serviceRecommendation, 'Each lead in list must include serviceRecommendation');
 
     // Authenticated get lead by ID
     const getRes = await app.inject({
@@ -339,6 +352,10 @@ async function runLeadTests() {
     assert.equal(getRes.statusCode, 200);
     const getBody = JSON.parse(getRes.payload);
     assert.equal(getBody.lead.businessName, 'Apex Dental Care');
+    assert.ok(getBody.serviceRecommendation, 'Top-level serviceRecommendation must be present');
+    assert.ok(getBody.lead.serviceRecommendation, 'Lead object serviceRecommendation must be present');
+    assert.equal(getBody.serviceRecommendation.hasOpportunity, false);
+    assert.equal(getBody.serviceRecommendation.serviceOpportunity, 'NONE');
 
     // Cross-tenant HTTP attempt -> 404 (NotFoundError masked)
     const crossRes = await app.inject({
@@ -359,6 +376,23 @@ async function runLeadTests() {
     });
     assert.equal(malformedRes.statusCode, 400);
 
+    // Valid create lead via API (without domain)
+    const createNoDomainRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/leads',
+      headers: { authorization: `Bearer ${tokenA}` },
+      payload: {
+        campaignId,
+        businessName: 'No Web API Clinic',
+        phone: '+442079462222',
+      },
+    });
+    assert.equal(createNoDomainRes.statusCode, 201);
+    const createNoDomainBody = JSON.parse(createNoDomainRes.payload);
+    assert.equal(createNoDomainBody.serviceRecommendation?.serviceOpportunity, 'YES');
+    assert.equal(createNoDomainBody.serviceRecommendation?.recommendedService, 'Website Design / Development');
+    assert.equal(createNoDomainBody.serviceRecommendation?.reason, 'No business website found.');
+
     // Valid create lead via API
     const createApiRes = await app.inject({
       method: 'POST',
@@ -372,6 +406,8 @@ async function runLeadTests() {
       },
     });
     assert.equal(createApiRes.statusCode, 201);
+    const createBody = JSON.parse(createApiRes.payload);
+    assert.ok(createBody.serviceRecommendation, 'Created lead response must include serviceRecommendation');
 
     await app.close();
     console.log('✓ Fastify Lead and Contact HTTP routes passed');

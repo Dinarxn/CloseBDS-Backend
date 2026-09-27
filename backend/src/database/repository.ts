@@ -646,7 +646,7 @@ export class LeadRepository implements BaseRepository<Lead> {
   async findManyPaginated(
     workspaceId: string,
     filter?: { campaignId?: string; status?: LeadStatus; search?: string; page?: number; limit?: number }
-  ): Promise<PaginationResult<Lead & { contacts: Contact[] }>> {
+  ): Promise<PaginationResult<Lead & { contacts: Contact[]; leadScore?: LeadScore | null; websiteAudit?: WebsiteAudit | null; aiAnalysis?: AIAnalysis | null }>> {
     const page = Math.max(1, filter?.page || 1);
     const limit = Math.min(100, Math.max(1, filter?.limit || 20));
     const skip = (page - 1) * limit;
@@ -673,6 +673,8 @@ export class LeadRepository implements BaseRepository<Lead> {
         include: {
           contacts: true,
           leadScore: true,
+          websiteAudit: true,
+          aiAnalysis: true,
         },
         orderBy: { createdAt: 'desc' },
         skip,

@@ -40,6 +40,7 @@ export const leadRouter: FastifyPluginAsync = async (fastify): Promise<void> => 
     return reply.status(200).send({
       success: true,
       lead,
+      serviceRecommendation: lead.serviceRecommendation,
     });
   });
 
@@ -53,6 +54,7 @@ export const leadRouter: FastifyPluginAsync = async (fastify): Promise<void> => 
     return reply.status(201).send({
       success: true,
       lead,
+      serviceRecommendation: lead.serviceRecommendation,
     });
   });
 
@@ -66,6 +68,7 @@ export const leadRouter: FastifyPluginAsync = async (fastify): Promise<void> => 
     return reply.status(200).send({
       success: true,
       lead,
+      serviceRecommendation: lead.serviceRecommendation,
     });
   });
 
