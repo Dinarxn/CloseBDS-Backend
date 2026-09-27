@@ -28,7 +28,7 @@ export class LeadService {
    */
   async listLeads(
     workspaceId: string,
-    query: LeadQueryInput
+    query: Partial<LeadQueryInput> = {}
   ): Promise<PaginationResult<LeadWithDetails>> {
     const result = await this.leadRepo.findManyPaginated(workspaceId, {
       campaignId: query.campaignId,
