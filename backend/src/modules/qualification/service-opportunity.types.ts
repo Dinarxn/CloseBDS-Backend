@@ -26,7 +26,7 @@ export interface ServiceOpportunityInput {
     mobileOptimized?: boolean;
     bookingCtaVisible?: boolean;
     auditGaps?: string[];
-    rawAuditData?: Record<string, unknown> | null;
+    rawAuditData?: unknown;
   } | null;
   aiAnalysis?: {
     summary?: string;

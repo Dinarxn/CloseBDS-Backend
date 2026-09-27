@@ -13,12 +13,18 @@ import { NotFoundError } from '../../core/errors/api-error.js';
 import type { QualifyLeadInput } from './qualification.schema.js';
 import type { LeadScore, AIAnalysis, WebsiteAudit } from '@prisma/client';
 
+import type {
+  ServiceRecommendation,
+} from './service-opportunity.types.js';
+import { evaluateServiceOpportunity } from './service-opportunity.evaluator.js';
+
 export interface QualificationResponse {
   status: 'completed' | 'unavailable';
   message: string;
   leadScore?: LeadScore;
   aiAnalysis?: AIAnalysis;
   websiteAudit?: WebsiteAudit | null;
+  serviceRecommendation?: ServiceRecommendation;
 }
 
 export class QualificationDomainService {
@@ -44,12 +50,20 @@ export class QualificationDomainService {
       this.aiAnalysisRepo.findByLeadId(leadId, workspaceId),
     ]);
 
+    const serviceRecommendation = evaluateServiceOpportunity({
+      domain: lead.domain,
+      websiteAudit: lead.websiteAudit,
+      aiAnalysis: aiAnalysis || undefined,
+      leadScore: leadScore || undefined,
+    });
+
     return {
       status: 'completed',
       message: 'Qualification data retrieved',
       leadScore: leadScore || undefined,
       aiAnalysis: aiAnalysis || undefined,
       websiteAudit: lead.websiteAudit,
+      serviceRecommendation,
     };
   }
 
@@ -134,7 +148,25 @@ export class QualificationDomainService {
       status: isQualified ? 'QUALIFIED' : 'DISQUALIFIED',
     });
 
-    // 4. Audit Log & n8n event dispatch
+    // 4. Deterministic Service Opportunity & Recommendation Evaluation
+    const serviceRecommendation = evaluateServiceOpportunity({
+      domain: lead.domain,
+      websiteAudit: lead.websiteAudit,
+      aiAnalysis: {
+        summary,
+        opportunityPoints,
+        riskFactors,
+      },
+      leadScore: {
+        rationale,
+      },
+      observations: [
+        ...(lead.websiteAudit?.auditGaps || []),
+        ...(input.manualScoreOverride ? input.manualScoreOverride.opportunityPoints : []),
+      ],
+    });
+
+    // 5. Audit Log & n8n event dispatch
     try {
       await this.auditLogger.create({
         workspaceId,
@@ -147,6 +179,8 @@ export class QualificationDomainService {
           relevanceScore,
           opportunityScore,
           isQualified,
+          serviceOpportunity: serviceRecommendation.serviceOpportunity,
+          recommendedService: serviceRecommendation.recommendedService,
         },
       });
 
@@ -156,6 +190,7 @@ export class QualificationDomainService {
           leadId,
           totalScore,
           isQualified,
+          serviceRecommendation,
         }).catch(() => {});
       }
     } catch {
@@ -168,6 +203,7 @@ export class QualificationDomainService {
       leadScore: savedScore,
       aiAnalysis: savedAnalysis,
       websiteAudit: lead.websiteAudit,
+      serviceRecommendation,
     };
   }
 }

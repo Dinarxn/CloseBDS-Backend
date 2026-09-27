@@ -35,6 +35,8 @@ export interface QualityCheck {
   issues: string[];
 }
 
+import type { ServiceRecommendation } from '../../modules/qualification/service-opportunity.types.js';
+
 export interface HumanApproval {
   status: 'pending' | 'approved' | 'rejected';
   approvedBy?: string;
@@ -52,6 +54,7 @@ export const LeadAgentAnnotation = Annotation.Root({
   leadContext: Annotation<LeadContext | undefined>,
   aiResult: Annotation<AiResult | undefined>,
   qualification: Annotation<Qualification | undefined>,
+  serviceRecommendation: Annotation<ServiceRecommendation | undefined>,
   personalizedMessage: Annotation<PersonalizedMessage | undefined>,
   qualityCheck: Annotation<QualityCheck | undefined>,
   approval: Annotation<HumanApproval | undefined>,

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { LeadAgentState } from '../state/lead-agent.state.js';
 import { testGeminiConnection } from '../../integrations/ai/gemini.client.js';
 import { databaseClient } from '../../database/client.js';
+import { evaluateServiceOpportunity } from '../../modules/qualification/service-opportunity.evaluator.js';
 
 export const LeadContextSchema = z.object({
   leadId: z.string().min(1),
@@ -228,10 +229,16 @@ export async function qualifyLead(state: LeadAgentState): Promise<Partial<LeadAg
     score,
   });
 
+  const serviceRecommendation = evaluateServiceOpportunity({
+    domain: state.leadContext?.domain,
+    observations: [state.aiResult.summary, state.aiResult.intent],
+  });
+
   return {
     status: 'completed',
     currentStep: 'qualification_completed',
     qualification: qualificationData,
+    serviceRecommendation,
   };
 }
 
@@ -390,11 +397,14 @@ Required JSON Structure:
 
     const response = await testGeminiConnection(prompt);
 
-    const cleanJson = response.text
-      .replace(/^```json\s*/i, '')
-      .replace(/^```\s*/i, '')
-      .replace(/\s*```$/i, '')
-      .trim();
+    const jsonMatch = response.text.match(/\{[\s\S]*\}/);
+    const cleanJson = jsonMatch
+      ? jsonMatch[0]
+      : response.text
+          .replace(/^```json\s*/i, '')
+          .replace(/^```\s*/i, '')
+          .replace(/\s*```$/i, '')
+          .trim();
 
     const parsedJson = JSON.parse(cleanJson);
     const validatedMessage = PersonalizedMessageSchema.parse(parsedJson);
@@ -566,18 +576,34 @@ export type HumanApproval = z.infer<typeof HumanApprovalSchema>;
  * Performs ZERO LLM calls, ZERO database mutations, and ZERO outbound actions.
  */
 export async function humanApprovalGate(state: LeadAgentState): Promise<Partial<LeadAgentState>> {
-  // Critical Safety Rule 1: Failed QC or workflow failure cannot be bypassed by approval!
-  if (state.status === 'failed' || (state.qualityCheck && state.qualityCheck.passed === false)) {
+  // Critical Safety Rule 1: Failed QC or rogue approval on failed workflow cannot bypass gate
+  if (state.qualityCheck && state.qualityCheck.passed === false) {
     return {
       status: 'failed',
       currentStep: 'human_approval_blocked_by_qc',
-      error: state.error || 'Human approval blocked: quality check failed or workflow is in failed status',
+      error: state.error || 'Human approval blocked: quality check failed',
+    };
+  }
+
+  if (state.status === 'failed') {
+    if (state.approval && state.approval.status === 'approved') {
+      return {
+        status: 'failed',
+        currentStep: 'human_approval_blocked_by_qc',
+        error: state.error || 'Human approval blocked: workflow is in failed status',
+      };
+    }
+    return {
+      status: 'failed',
+      currentStep: state.currentStep,
+      error: state.error,
     };
   }
 
   // Critical Rule 2: Unqualified lead skips approval (does not invent approval requirement for non-drafted lead)
   if (state.qualification && state.qualification.qualified === false) {
     return {
+      status: 'completed',
       currentStep: 'human_approval_skipped',
     };
   }
@@ -585,6 +611,7 @@ export async function humanApprovalGate(state: LeadAgentState): Promise<Partial<
   // If no draft message exists, skip approval
   if (!state.personalizedMessage) {
     return {
+      status: 'completed',
       currentStep: 'human_approval_skipped',
     };
   }

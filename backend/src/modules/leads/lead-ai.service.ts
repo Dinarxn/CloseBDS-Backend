@@ -15,6 +15,7 @@ import type {
   QualityCheck,
   HumanApproval,
 } from '../../agents/state/lead-agent.state.js';
+import type { ServiceRecommendation } from '../qualification/service-opportunity.types.js';
 
 export interface LeadAiWorkflowResult {
   leadId: string;
@@ -22,6 +23,7 @@ export interface LeadAiWorkflowResult {
   currentStep: string;
   aiResult?: AiResult;
   qualification?: Qualification;
+  serviceRecommendation?: ServiceRecommendation;
   personalizedMessage?: PersonalizedMessage;
   qualityCheck?: QualityCheck;
   approval?: HumanApproval;
@@ -139,6 +141,7 @@ export class LeadAiService {
         currentStep: graphResult.currentStep,
         aiResult: graphResult.aiResult,
         qualification: graphResult.qualification,
+        serviceRecommendation: graphResult.serviceRecommendation,
         personalizedMessage: graphResult.personalizedMessage,
         qualityCheck: graphResult.qualityCheck,
         approval: graphResult.approval || { status: 'pending' },
