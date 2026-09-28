@@ -32,16 +32,23 @@ export interface NormalizedWebsiteResult {
   domain?: string;
 }
 
+export type MapsMatchStatus = 'TARGETED' | 'UNVERIFIED';
+
 export interface ValidatedCoordinates {
   latitude?: number;
   longitude?: number;
 }
 
 export interface TargetedMapsUrlInput {
-  businessName: string;
-  address?: string;
-  latitude?: number;
-  longitude?: number;
+  businessName?: string | null;
+  address?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+}
+
+export interface TargetedMapsUrlResult {
+  mapsUrl?: string;
+  mapsMatchStatus?: MapsMatchStatus;
 }
 
 export interface DataQualityClassificationInput {
@@ -364,32 +371,105 @@ export function normalizeWebsiteAndDomain(rawWebsite?: string | null): Normalize
   };
 }
 
+function safeDecodeComponent(str: string): string {
+  try {
+    if (/%[0-9a-fA-F]{2}/.test(str)) {
+      return decodeURIComponent(str);
+    }
+  } catch {
+    // If decoding fails, keep original
+  }
+  return str;
+}
+
+/**
+ * Builds a deterministic Google Maps search URL and match status from business identity and location signals.
+ * Uses the standard Google Maps Search API contract: https://www.google.com/maps/search/?api=1&query=...
+ * Never fabricates Google Place IDs or CIDs.
+ * Coordinates are validated and ordered as latitude, longitude.
+ */
+export function buildTargetedMapsDetails(params: TargetedMapsUrlInput): TargetedMapsUrlResult {
+  const rawBiz = params.businessName && typeof params.businessName === 'string' ? params.businessName.trim() : '';
+  const rawAddr = params.address && typeof params.address === 'string' ? params.address.trim() : '';
+
+  const cleanBiz =
+    rawBiz.toLowerCase() !== 'undefined' && rawBiz.toLowerCase() !== 'null'
+      ? safeDecodeComponent(rawBiz).replace(/\s+/g, ' ').trim()
+      : '';
+  const cleanAddr =
+    rawAddr.toLowerCase() !== 'undefined' && rawAddr.toLowerCase() !== 'null'
+      ? safeDecodeComponent(rawAddr).replace(/\s+/g, ' ').trim()
+      : '';
+
+  const coords = validateCoordinates(params.latitude, params.longitude);
+  const hasCoords = coords.latitude !== undefined && coords.longitude !== undefined;
+  const hasBiz = cleanBiz.length > 0;
+  const hasAddr = cleanAddr.length > 0;
+
+  let query: string | undefined;
+  let mapsMatchStatus: MapsMatchStatus | undefined;
+
+  // Case A: Business Name + Full Address + Coordinates (strongest targeted query)
+  if (hasBiz && hasAddr && hasCoords) {
+    query = `${cleanBiz}, ${cleanAddr}, ${coords.latitude},${coords.longitude}`;
+    mapsMatchStatus = 'TARGETED';
+  }
+  // Case B: Business Name + Address (targeted query without coordinates)
+  else if (hasBiz && hasAddr) {
+    query = `${cleanBiz}, ${cleanAddr}`;
+    mapsMatchStatus = 'TARGETED';
+  }
+  // Case C: Business Name + Coordinates (targeted query without address)
+  else if (hasBiz && hasCoords) {
+    query = `${cleanBiz} ${coords.latitude},${coords.longitude}`;
+    mapsMatchStatus = 'TARGETED';
+  }
+  // Fallback: Address + Coordinates (when business name is missing)
+  else if (hasAddr && hasCoords) {
+    query = `${cleanAddr}, ${coords.latitude},${coords.longitude}`;
+    mapsMatchStatus = 'UNVERIFIED';
+  }
+  // Fallback: Address only
+  else if (hasAddr) {
+    query = cleanAddr;
+    mapsMatchStatus = 'UNVERIFIED';
+  }
+  // Case D: Coordinates only (unverified coordinate pin)
+  else if (hasCoords) {
+    query = `${coords.latitude},${coords.longitude}`;
+    mapsMatchStatus = 'UNVERIFIED';
+  }
+  // Fallback: Business name only (unverified name search)
+  else if (hasBiz) {
+    query = cleanBiz;
+    mapsMatchStatus = 'UNVERIFIED';
+  }
+  // Case E: Nothing usable
+  else {
+    return { mapsUrl: undefined, mapsMatchStatus: undefined };
+  }
+
+  const normalizedQuery = query.replace(/\s+/g, ' ').replace(/,\s*,+/g, ',').trim();
+  if (!normalizedQuery || normalizedQuery.toLowerCase() === 'undefined' || normalizedQuery.toLowerCase() === 'null') {
+    return { mapsUrl: undefined, mapsMatchStatus: undefined };
+  }
+
+  const encodedQuery = encodeURIComponent(normalizedQuery);
+  const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodedQuery}`;
+
+  return {
+    mapsUrl,
+    mapsMatchStatus,
+  };
+}
+
 /**
  * Builds a deterministic Google Maps search URL from business name, address, and coordinates.
+ * Preserves backwards compatibility by returning string | undefined.
  * Does NOT claim Geoapify place_id is a Google Place ID.
  */
 export function buildTargetedMapsUrl(params: TargetedMapsUrlInput): string | undefined {
-  const bizName = params.businessName?.trim();
-  if (!bizName) {
-    return undefined;
-  }
-
-  const coords = validateCoordinates(params.latitude, params.longitude);
-  const cleanAddr = params.address?.trim();
-
-  let query: string;
-
-  if (cleanAddr) {
-    // Highly specific: "Business Name, 10 Fleet Street, London, EC4Y 1AA, United Kingdom"
-    query = `${bizName}, ${cleanAddr}`;
-  } else if (coords.latitude !== undefined && coords.longitude !== undefined) {
-    // If no address but coords exist: "Business Name 51.5074,-0.1278"
-    query = `${bizName} ${coords.latitude},${coords.longitude}`;
-  } else {
-    query = bizName;
-  }
-
-  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+  return buildTargetedMapsDetails(params).mapsUrl;
 }
 
 /**
@@ -494,6 +574,8 @@ export interface SafeEnrichmentMergeInput {
   existingPlaceId?: string | null;
   existingEmail?: string | null;
   existingAdditionalEmails?: string[];
+  existingMapsUrl?: string | null;
+  existingMapsMatchStatus?: MapsMatchStatus | null;
   details?: PlaceDetailsRawProperties | null;
 }
 
@@ -511,6 +593,7 @@ export interface SafeEnrichmentMergeResult {
   longitude?: number;
   placeId?: string;
   mapsUrl?: string;
+  mapsMatchStatus?: MapsMatchStatus;
   dataQuality: LeadDataQuality;
   placeDetailsEnriched: boolean;
 }
@@ -662,13 +745,27 @@ export function safeMergePlaceDetails(input: SafeEnrichmentMergeInput): SafeEnri
   // 7. Place ID: preserve existing
   const placeId = input.existingPlaceId || undefined;
 
-  // 8. Targeted Maps URL
-  const mapsUrl = buildTargetedMapsUrl({
+  // 8. Targeted Maps URL & Match Status
+  const computedMaps = buildTargetedMapsDetails({
     businessName,
     address: canonicalAddress,
     latitude,
     longitude,
   });
+
+  // Preserve valid existing mapsUrl if newly computed is missing or weaker
+  let mapsUrl = computedMaps.mapsUrl;
+  let mapsMatchStatus = computedMaps.mapsMatchStatus;
+
+  if (input.existingMapsUrl && input.existingMapsUrl.trim().startsWith('http')) {
+    if (!mapsUrl) {
+      mapsUrl = input.existingMapsUrl.trim();
+      mapsMatchStatus = input.existingMapsMatchStatus || 'UNVERIFIED';
+    } else if (input.existingMapsMatchStatus === 'TARGETED' && mapsMatchStatus === 'UNVERIFIED') {
+      mapsUrl = input.existingMapsUrl.trim();
+      mapsMatchStatus = 'TARGETED';
+    }
+  }
 
   // 9. Data Quality Classification
   const dataQuality = classifyDataQuality({
@@ -696,6 +793,7 @@ export function safeMergePlaceDetails(input: SafeEnrichmentMergeInput): SafeEnri
     longitude,
     placeId,
     mapsUrl,
+    mapsMatchStatus,
     dataQuality,
     placeDetailsEnriched: hasDetails,
   };

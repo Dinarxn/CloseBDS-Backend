@@ -187,6 +187,7 @@ export class DiscoveryDomainService {
         if (normalized.latitude !== undefined) sourcePayload.latitude = normalized.latitude;
         if (normalized.longitude !== undefined) sourcePayload.longitude = normalized.longitude;
         if (normalized.mapsUrl) sourcePayload.mapsUrl = normalized.mapsUrl;
+        if (normalized.mapsMatchStatus) sourcePayload.mapsMatchStatus = normalized.mapsMatchStatus;
         if (normalized.dataQuality) sourcePayload.dataQuality = normalized.dataQuality;
         if (normalized.additionalPhones && normalized.additionalPhones.length > 0) {
           sourcePayload.additionalPhones = normalized.additionalPhones;
@@ -244,6 +245,7 @@ export class DiscoveryDomainService {
       if (normalized.latitude !== undefined) newSourcePayload.latitude = normalized.latitude;
       if (normalized.longitude !== undefined) newSourcePayload.longitude = normalized.longitude;
       if (normalized.mapsUrl) newSourcePayload.mapsUrl = normalized.mapsUrl;
+      if (normalized.mapsMatchStatus) newSourcePayload.mapsMatchStatus = normalized.mapsMatchStatus;
       if (normalized.dataQuality) newSourcePayload.dataQuality = normalized.dataQuality;
       if (normalized.additionalPhones && normalized.additionalPhones.length > 0) {
         newSourcePayload.additionalPhones = normalized.additionalPhones;

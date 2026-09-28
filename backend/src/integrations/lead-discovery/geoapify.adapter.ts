@@ -13,11 +13,12 @@ import {
 import {
   type LeadDataQuality,
   type PlaceDetailsRawProperties,
+  type MapsMatchStatus,
   validateCoordinates,
   normalizeStructuredAddress,
   normalizePhones,
   normalizeWebsiteAndDomain,
-  buildTargetedMapsUrl,
+  buildTargetedMapsDetails,
   classifyDataQuality,
   safeMergePlaceDetails,
 } from './lead-normalization.js';
@@ -609,6 +610,7 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
           additionalWebsites: merged.additionalWebsites,
           domain: merged.domain,
           mapsUrl: merged.mapsUrl,
+          mapsMatchStatus: merged.mapsMatchStatus,
           dataQuality: merged.dataQuality,
           placeDetailsEnriched: merged.placeDetailsEnriched,
         },
@@ -695,16 +697,27 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
         ? meta.placeDetailsEnriched
         : undefined;
 
-    // 7. Maps URL
-    const mapsUrl =
-      typeof meta.mapsUrl === 'string'
-        ? meta.mapsUrl
-        : buildTargetedMapsUrl({
-            businessName: raw.rawName.trim(),
-            address: normalizedAddress,
-            latitude: coords.latitude,
-            longitude: coords.longitude,
-          });
+    // 7. Maps URL & Match Status resolution
+    let mapsUrl: string | undefined;
+    let mapsMatchStatus: MapsMatchStatus | undefined;
+
+    if (typeof meta.mapsUrl === 'string') {
+      mapsUrl = meta.mapsUrl;
+      if (meta.mapsMatchStatus === 'TARGETED' || meta.mapsMatchStatus === 'UNVERIFIED') {
+        mapsMatchStatus = meta.mapsMatchStatus as MapsMatchStatus;
+      }
+    }
+
+    if (!mapsUrl) {
+      const mapsDetails = buildTargetedMapsDetails({
+        businessName: raw.rawName.trim(),
+        address: normalizedAddress,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+      });
+      mapsUrl = mapsDetails.mapsUrl;
+      mapsMatchStatus = mapsDetails.mapsMatchStatus;
+    }
 
     // 8. Data Quality classification
     const dataQuality: LeadDataQuality =
@@ -739,6 +752,7 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
       latitude: coords.latitude,
       longitude: coords.longitude,
       mapsUrl,
+      mapsMatchStatus,
       dataQuality,
       placeDetailsEnriched,
     };

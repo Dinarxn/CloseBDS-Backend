@@ -37,6 +37,7 @@ export interface NormalizedLeadCandidate {
   latitude?: number;
   longitude?: number;
   mapsUrl?: string;
+  mapsMatchStatus?: import('./lead-normalization.js').MapsMatchStatus;
   dataQuality?: import('./lead-normalization.js').LeadDataQuality;
   placeDetailsEnriched?: boolean;
 }
@@ -63,7 +64,9 @@ export {
   type NormalizedEmailsResult,
   type NormalizedWebsiteResult,
   type ValidatedCoordinates,
+  type MapsMatchStatus,
   type TargetedMapsUrlInput,
+  type TargetedMapsUrlResult,
   type DataQualityClassificationInput,
   type PlaceDetailsRawProperties,
   type SafeEnrichmentMergeInput,
@@ -73,6 +76,7 @@ export {
   normalizePhones,
   normalizeEmails,
   normalizeWebsiteAndDomain,
+  buildTargetedMapsDetails,
   buildTargetedMapsUrl,
   classifyDataQuality,
   safeMergePlaceDetails,
