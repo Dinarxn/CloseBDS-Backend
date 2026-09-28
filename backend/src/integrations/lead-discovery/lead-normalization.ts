@@ -51,6 +51,45 @@ export interface TargetedMapsUrlResult {
   mapsMatchStatus?: MapsMatchStatus;
 }
 
+/**
+ * Phase B4: Lead Quality, Actionability & Channel Eligibility Types
+ */
+export type LeadActionabilityTier =
+  | 'READY'
+  | 'ENRICHMENT_REQUIRED'
+  | 'ARCHIVED_WEAK';
+
+export type LeadEligibilityChannel =
+  | 'VOICE'
+  | 'EMAIL'
+  | 'WEBSITE_AUDIT';
+
+export type LeadMissingField =
+  | 'PHONE'
+  | 'EMAIL'
+  | 'WEBSITE'
+  | 'ADDRESS'
+  | 'COORDINATES';
+
+export interface LeadActionability {
+  tier: LeadActionabilityTier;
+  isActionable: boolean;
+  eligibleChannels: LeadEligibilityChannel[];
+  missingFields: LeadMissingField[];
+  reasons: string[];
+}
+
+export interface EvaluateLeadActionabilityInput {
+  businessName?: string | null;
+  address?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  phone?: string | null;
+  email?: string | null;
+  websiteUrl?: string | null;
+  domain?: string | null;
+}
+
 export interface DataQualityClassificationInput {
   businessName: string;
   address?: string | null;
@@ -506,6 +545,115 @@ export function classifyDataQuality(input: DataQualityClassificationInput): Lead
 }
 
 /**
+  * Evaluates lead actionability, communication/research channel eligibility,
+  * missing data fields, and factual quality reasons.
+  * Pure deterministic function with zero external network or AI dependencies.
+  */
+export function evaluateLeadActionability(input: EvaluateLeadActionabilityInput): LeadActionability {
+  // 1. Business name validation
+  const rawBiz = typeof input.businessName === 'string' ? input.businessName.trim() : '';
+  const hasName =
+    rawBiz.length > 0 &&
+    rawBiz.toLowerCase() !== 'undefined' &&
+    rawBiz.toLowerCase() !== 'null';
+
+  // 2. Address validation (usable address must have at least 5 characters)
+  const rawAddr = typeof input.address === 'string' ? input.address.trim() : '';
+  const hasAddress =
+    rawAddr.length >= 5 &&
+    rawAddr.toLowerCase() !== 'undefined' &&
+    rawAddr.toLowerCase() !== 'null';
+
+  // 3. Coordinates validation
+  const coords = validateCoordinates(input.latitude, input.longitude);
+  const hasCoordinates = coords.latitude !== undefined && coords.longitude !== undefined;
+
+  // 4. Phone validation (must be valid under phone normalization)
+  let hasPhone = false;
+  if (input.phone && typeof input.phone === 'string') {
+    const rawP = input.phone.trim();
+    if (rawP.toLowerCase() !== 'undefined' && rawP.toLowerCase() !== 'null') {
+      const normP = normalizePhones(rawP);
+      hasPhone = Boolean(normP.primaryPhone && normP.primaryPhone.length >= 5);
+    }
+  }
+
+  // 5. Email validation (must be valid under email normalization)
+  let hasEmail = false;
+  if (input.email && typeof input.email === 'string') {
+    const rawE = input.email.trim();
+    if (rawE.toLowerCase() !== 'undefined' && rawE.toLowerCase() !== 'null') {
+      const normE = normalizeEmails(rawE);
+      hasEmail = Boolean(normE.email && normE.email.includes('@'));
+    }
+  }
+
+  // 6. Website / domain validation (must be valid under domain normalization)
+  let hasWebsite = false;
+  const webCandidate = input.websiteUrl || input.domain;
+  if (webCandidate && typeof webCandidate === 'string') {
+    const rawW = webCandidate.trim();
+    if (rawW.toLowerCase() !== 'undefined' && rawW.toLowerCase() !== 'null') {
+      const normW = normalizeWebsiteAndDomain(rawW);
+      hasWebsite = Boolean(normW.domain && normW.domain.length >= 4);
+    }
+  }
+
+  // 7. Channel eligibility
+  const eligibleChannels: LeadEligibilityChannel[] = [];
+  if (hasPhone) eligibleChannels.push('VOICE');
+  if (hasEmail) eligibleChannels.push('EMAIL');
+  if (hasWebsite) eligibleChannels.push('WEBSITE_AUDIT');
+
+  // isActionable: True if lead has at least one verified channel to perform a meaningful next action
+  const isActionable = eligibleChannels.length > 0;
+
+  // 8. Missing fields
+  const missingFields: LeadMissingField[] = [];
+  if (!hasPhone) missingFields.push('PHONE');
+  if (!hasEmail) missingFields.push('EMAIL');
+  if (!hasWebsite) missingFields.push('WEBSITE');
+  if (!hasAddress) missingFields.push('ADDRESS');
+  if (!hasCoordinates) missingFields.push('COORDINATES');
+
+  // 9. Factual reasons
+  const reasons: string[] = [];
+  if (!hasPhone) reasons.push('NO_PHONE');
+  if (!hasEmail) reasons.push('NO_EMAIL');
+  if (!hasWebsite) reasons.push('NO_WEBSITE');
+  if (!hasAddress) reasons.push('NO_ADDRESS');
+  if (!hasCoordinates) reasons.push('NO_COORDINATES');
+  if (!hasPhone && !hasEmail) reasons.push('NO_DIRECT_CONTACT');
+  if (!hasAddress || !hasCoordinates) reasons.push('INCOMPLETE_LOCATION');
+  if (!hasName || (!hasAddress && !hasCoordinates && !hasPhone && !hasEmail && !hasWebsite)) {
+    reasons.push('MINIMAL_BUSINESS_IDENTITY');
+  }
+
+  // 10. Actionability tier
+  let tier: LeadActionabilityTier;
+  const hasDirectContact = hasPhone || hasEmail;
+  const hasSufficientLocation = hasAddress && hasCoordinates;
+
+  if (hasName && hasSufficientLocation && hasDirectContact) {
+    tier = 'READY';
+  } else if (!hasDirectContact && !hasWebsite && !hasAddress) {
+    // Missing all contact/audit channels and missing full address (e.g. name only, coords only, name+coords only, empty)
+    tier = 'ARCHIVED_WEAK';
+  } else {
+    // Has meaningful identity/location/contact, but requires enrichment (e.g. website only, address+website no phone, phone+coords no address)
+    tier = 'ENRICHMENT_REQUIRED';
+  }
+
+  return {
+    tier,
+    isActionable,
+    eligibleChannels,
+    missingFields,
+    reasons,
+  };
+}
+
+/**
  * Normalizes email address(es).
  * Validates structure, lowercases, deduplicates case-insensitively,
  * deterministically selects a primary email and returns additional emails.
@@ -595,6 +743,7 @@ export interface SafeEnrichmentMergeResult {
   mapsUrl?: string;
   mapsMatchStatus?: MapsMatchStatus;
   dataQuality: LeadDataQuality;
+  actionability: LeadActionability;
   placeDetailsEnriched: boolean;
 }
 
@@ -779,6 +928,18 @@ export function safeMergePlaceDetails(input: SafeEnrichmentMergeInput): SafeEnri
     domain,
   });
 
+  // 10. Actionability & Channel Eligibility Evaluation
+  const actionability = evaluateLeadActionability({
+    businessName,
+    address: canonicalAddress,
+    latitude,
+    longitude,
+    phone: primaryPhone,
+    email: mergedEmails.email,
+    websiteUrl,
+    domain,
+  });
+
   return {
     businessName,
     canonicalAddress,
@@ -795,6 +956,7 @@ export function safeMergePlaceDetails(input: SafeEnrichmentMergeInput): SafeEnri
     mapsUrl,
     mapsMatchStatus,
     dataQuality,
+    actionability,
     placeDetailsEnriched: hasDetails,
   };
 }

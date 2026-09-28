@@ -12,6 +12,7 @@ import {
 } from '../core/provider.types.js';
 import {
   type LeadDataQuality,
+  type LeadActionability,
   type PlaceDetailsRawProperties,
   type MapsMatchStatus,
   validateCoordinates,
@@ -20,6 +21,7 @@ import {
   normalizeWebsiteAndDomain,
   buildTargetedMapsDetails,
   classifyDataQuality,
+  evaluateLeadActionability,
   safeMergePlaceDetails,
 } from './lead-normalization.js';
 
@@ -612,6 +614,7 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
           mapsUrl: merged.mapsUrl,
           mapsMatchStatus: merged.mapsMatchStatus,
           dataQuality: merged.dataQuality,
+          actionability: merged.actionability,
           placeDetailsEnriched: merged.placeDetailsEnriched,
         },
       });
@@ -735,6 +738,21 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
             domain,
           });
 
+    // 9. Actionability evaluation
+    const actionability: LeadActionability =
+      meta.actionability && typeof meta.actionability === 'object'
+        ? (meta.actionability as LeadActionability)
+        : evaluateLeadActionability({
+            businessName: raw.rawName.trim(),
+            address: normalizedAddress,
+            latitude: coords.latitude,
+            longitude: coords.longitude,
+            phone: normalizedPhone,
+            email,
+            websiteUrl: websiteUrl || raw.rawWebsite?.trim() || undefined,
+            domain,
+          });
+
     return {
       businessName: raw.rawName.trim(),
       normalizedAddress,
@@ -754,6 +772,7 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
       mapsUrl,
       mapsMatchStatus,
       dataQuality,
+      actionability,
       placeDetailsEnriched,
     };
   }

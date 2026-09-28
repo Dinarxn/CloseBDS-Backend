@@ -1,7 +1,9 @@
-import type {
-  LeadDiscoveryService,
-  NormalizedLeadCandidate,
-  RawLeadCandidate,
+import {
+  type LeadDiscoveryService,
+  type NormalizedLeadCandidate,
+  type RawLeadCandidate,
+  classifyDataQuality,
+  evaluateLeadActionability,
 } from '../../integrations/lead-discovery/index.js';
 import { StandardDiscoveryAdapter } from '../../integrations/lead-discovery/discovery.adapter.js';
 import { GeoapifyDiscoveryAdapter } from '../../integrations/lead-discovery/geoapify.adapter.js';
@@ -178,29 +180,134 @@ export class DiscoveryDomainService {
           Object.assign(existing, enrichData);
         }
 
+        // Retrieve existing full lead context to prevent downgrading upon re-discovery
+        const existingFull = await this.prisma.lead.findFirst({
+          where: { id: existing.id, workspaceId },
+          include: { contacts: true, leadSource: true },
+        });
+
+        const existingPayload =
+          existingFull?.leadSource?.queryPayload &&
+          typeof existingFull.leadSource.queryPayload === 'object' &&
+          !Array.isArray(existingFull.leadSource.queryPayload)
+            ? (existingFull.leadSource.queryPayload as Record<string, unknown>)
+            : {};
+
+        const existingContactEmail =
+          existingFull?.contacts?.find((c) => c.isPrimary)?.email ||
+          existingFull?.contacts?.[0]?.email;
+        const mergedEmail =
+          (typeof existingPayload.email === 'string' && existingPayload.email) ||
+          existingContactEmail ||
+          normalized.email;
+
+        const mergedPhone = existing.phone || normalized.normalizedPhone;
+        const mergedDomain = existing.domain || normalized.domain;
+        const mergedAddress = existing.address || normalized.normalizedAddress;
+
+        const existingLat =
+          typeof existingPayload.latitude === 'number' ? existingPayload.latitude : undefined;
+        const existingLon =
+          typeof existingPayload.longitude === 'number' ? existingPayload.longitude : undefined;
+        const mergedLat = existingLat !== undefined ? existingLat : normalized.latitude;
+        const mergedLon = existingLon !== undefined ? existingLon : normalized.longitude;
+
+        let mergedMapsUrl =
+          typeof existingPayload.mapsUrl === 'string' ? existingPayload.mapsUrl : undefined;
+        let mergedMapsStatus =
+          existingPayload.mapsMatchStatus === 'TARGETED' ||
+          existingPayload.mapsMatchStatus === 'UNVERIFIED'
+            ? existingPayload.mapsMatchStatus
+            : undefined;
+        if (!mergedMapsUrl && normalized.mapsUrl) {
+          mergedMapsUrl = normalized.mapsUrl;
+          mergedMapsStatus = normalized.mapsMatchStatus;
+        }
+
+        const existingWebsiteUrl =
+          typeof existingPayload.websiteUrl === 'string' ? existingPayload.websiteUrl : undefined;
+        const mergedWebsiteUrl = normalized.websiteUrl || existingWebsiteUrl;
+
+        const mergedDataQuality = classifyDataQuality({
+          businessName: existing.businessName,
+          address: mergedAddress,
+          latitude: mergedLat,
+          longitude: mergedLon,
+          phone: mergedPhone,
+          email: mergedEmail,
+          websiteUrl: mergedWebsiteUrl,
+          domain: mergedDomain,
+        });
+
+        const mergedActionability = evaluateLeadActionability({
+          businessName: existing.businessName,
+          address: mergedAddress,
+          latitude: mergedLat,
+          longitude: mergedLon,
+          phone: mergedPhone,
+          email: mergedEmail,
+          websiteUrl: mergedWebsiteUrl,
+          domain: mergedDomain,
+        });
+
         // Build metadata payload preserving defined fields
         const sourcePayload: Record<string, unknown> = {
           niche: query.niche,
           location: query.location,
         };
-        if (normalized.placeId) sourcePayload.placeId = normalized.placeId;
-        if (normalized.latitude !== undefined) sourcePayload.latitude = normalized.latitude;
-        if (normalized.longitude !== undefined) sourcePayload.longitude = normalized.longitude;
-        if (normalized.mapsUrl) sourcePayload.mapsUrl = normalized.mapsUrl;
-        if (normalized.mapsMatchStatus) sourcePayload.mapsMatchStatus = normalized.mapsMatchStatus;
-        if (normalized.dataQuality) sourcePayload.dataQuality = normalized.dataQuality;
-        if (normalized.additionalPhones && normalized.additionalPhones.length > 0) {
-          sourcePayload.additionalPhones = normalized.additionalPhones;
+        const placeId =
+          (typeof existingPayload.placeId === 'string' && existingPayload.placeId) ||
+          normalized.placeId;
+        if (placeId) sourcePayload.placeId = placeId;
+        if (mergedLat !== undefined) sourcePayload.latitude = mergedLat;
+        if (mergedLon !== undefined) sourcePayload.longitude = mergedLon;
+        if (mergedMapsUrl) sourcePayload.mapsUrl = mergedMapsUrl;
+        if (mergedMapsStatus) sourcePayload.mapsMatchStatus = mergedMapsStatus;
+        sourcePayload.dataQuality = mergedDataQuality;
+        sourcePayload.actionability = mergedActionability;
+
+        const mergedAddPhones =
+          normalized.additionalPhones && normalized.additionalPhones.length > 0
+            ? normalized.additionalPhones
+            : Array.isArray(existingPayload.additionalPhones)
+              ? (existingPayload.additionalPhones as string[])
+              : undefined;
+        if (mergedAddPhones && mergedAddPhones.length > 0) {
+          sourcePayload.additionalPhones = mergedAddPhones;
         }
-        if (normalized.email) sourcePayload.email = normalized.email;
-        if (normalized.additionalEmails && normalized.additionalEmails.length > 0) {
-          sourcePayload.additionalEmails = normalized.additionalEmails;
+
+        if (mergedEmail) sourcePayload.email = mergedEmail;
+
+        const mergedAddEmails =
+          normalized.additionalEmails && normalized.additionalEmails.length > 0
+            ? normalized.additionalEmails
+            : Array.isArray(existingPayload.additionalEmails)
+              ? (existingPayload.additionalEmails as string[])
+              : undefined;
+        if (mergedAddEmails && mergedAddEmails.length > 0) {
+          sourcePayload.additionalEmails = mergedAddEmails;
         }
-        if (normalized.additionalWebsites && normalized.additionalWebsites.length > 0) {
-          sourcePayload.additionalWebsites = normalized.additionalWebsites;
+
+        if (mergedWebsiteUrl) {
+          sourcePayload.websiteUrl = mergedWebsiteUrl;
         }
-        if (normalized.placeDetailsEnriched !== undefined) {
-          sourcePayload.placeDetailsEnriched = normalized.placeDetailsEnriched;
+
+        const mergedAddWebsites =
+          normalized.additionalWebsites && normalized.additionalWebsites.length > 0
+            ? normalized.additionalWebsites
+            : Array.isArray(existingPayload.additionalWebsites)
+              ? (existingPayload.additionalWebsites as string[])
+              : undefined;
+        if (mergedAddWebsites && mergedAddWebsites.length > 0) {
+          sourcePayload.additionalWebsites = mergedAddWebsites;
+        }
+
+        const mergedEnriched =
+          normalized.placeDetailsEnriched !== undefined
+            ? normalized.placeDetailsEnriched
+            : Boolean(existingPayload.placeDetailsEnriched);
+        if (mergedEnriched) {
+          sourcePayload.placeDetailsEnriched = true;
         }
 
         // Preserve primary LeadSource and record additional provider source
@@ -247,6 +354,7 @@ export class DiscoveryDomainService {
       if (normalized.mapsUrl) newSourcePayload.mapsUrl = normalized.mapsUrl;
       if (normalized.mapsMatchStatus) newSourcePayload.mapsMatchStatus = normalized.mapsMatchStatus;
       if (normalized.dataQuality) newSourcePayload.dataQuality = normalized.dataQuality;
+      if (normalized.actionability) newSourcePayload.actionability = normalized.actionability;
       if (normalized.additionalPhones && normalized.additionalPhones.length > 0) {
         newSourcePayload.additionalPhones = normalized.additionalPhones;
       }
@@ -256,6 +364,9 @@ export class DiscoveryDomainService {
       }
       if (normalized.additionalWebsites && normalized.additionalWebsites.length > 0) {
         newSourcePayload.additionalWebsites = normalized.additionalWebsites;
+      }
+      if (normalized.websiteUrl) {
+        newSourcePayload.websiteUrl = normalized.websiteUrl;
       }
       if (normalized.placeDetailsEnriched !== undefined) {
         newSourcePayload.placeDetailsEnriched = normalized.placeDetailsEnriched;

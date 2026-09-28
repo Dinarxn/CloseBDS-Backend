@@ -39,6 +39,7 @@ export interface NormalizedLeadCandidate {
   mapsUrl?: string;
   mapsMatchStatus?: import('./lead-normalization.js').MapsMatchStatus;
   dataQuality?: import('./lead-normalization.js').LeadDataQuality;
+  actionability?: import('./lead-normalization.js').LeadActionability;
   placeDetailsEnriched?: boolean;
 }
 
@@ -59,6 +60,11 @@ export {
 
 export {
   type LeadDataQuality,
+  type LeadActionabilityTier,
+  type LeadEligibilityChannel,
+  type LeadMissingField,
+  type LeadActionability,
+  type EvaluateLeadActionabilityInput,
   type StructuredAddressInput,
   type NormalizedPhonesResult,
   type NormalizedEmailsResult,
@@ -79,6 +85,7 @@ export {
   buildTargetedMapsDetails,
   buildTargetedMapsUrl,
   classifyDataQuality,
+  evaluateLeadActionability,
   safeMergePlaceDetails,
 } from './lead-normalization.js';
 
