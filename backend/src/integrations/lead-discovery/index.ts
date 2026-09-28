@@ -14,6 +14,7 @@ export interface RawLeadCandidate {
   rawName: string;
   rawAddress?: string;
   rawPhone?: string;
+  rawEmail?: string;
   rawWebsite?: string;
   rawCategory?: string;
   metadata?: Record<string, unknown>;
@@ -23,11 +24,18 @@ export interface NormalizedLeadCandidate {
   businessName: string;
   normalizedAddress?: string;
   normalizedPhone?: string;
+  additionalPhones?: string[];
+  email?: string;
   domain?: string;
   websiteUrl?: string;
   category?: string;
   sourceProvider: string;
   sourceExternalId: string;
+  placeId?: string;
+  latitude?: number;
+  longitude?: number;
+  mapsUrl?: string;
+  dataQuality?: import('./lead-normalization.js').LeadDataQuality;
 }
 
 /**
@@ -44,3 +52,20 @@ export {
   type GeoapifyAdapterConfig,
   NICHE_GEOAPIFY_MAP,
 } from './geoapify.adapter.js';
+
+export {
+  type LeadDataQuality,
+  type StructuredAddressInput,
+  type NormalizedPhonesResult,
+  type NormalizedWebsiteResult,
+  type ValidatedCoordinates,
+  type TargetedMapsUrlInput,
+  type DataQualityClassificationInput,
+  validateCoordinates,
+  normalizeStructuredAddress,
+  normalizePhones,
+  normalizeWebsiteAndDomain,
+  buildTargetedMapsUrl,
+  classifyDataQuality,
+} from './lead-normalization.js';
+

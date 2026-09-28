@@ -10,6 +10,15 @@ import {
   type ProviderHealthResult,
   ProviderError,
 } from '../core/provider.types.js';
+import {
+  type LeadDataQuality,
+  validateCoordinates,
+  normalizeStructuredAddress,
+  normalizePhones,
+  normalizeWebsiteAndDomain,
+  buildTargetedMapsUrl,
+  classifyDataQuality,
+} from './lead-normalization.js';
 
 export interface GeoapifyAdapterConfig {
   apiKey?: string;
@@ -85,6 +94,7 @@ interface GeoapifyFeature {
     lat?: number;
     lon?: number;
     phone?: string;
+    email?: string;
     website?: string;
     contact?: {
       phone?: string;
@@ -96,6 +106,8 @@ interface GeoapifyFeature {
       raw?: {
         phone?: string;
         'contact:phone'?: string;
+        email?: string;
+        'contact:email'?: string;
         website?: string;
         url?: string;
         [key: string]: unknown;
@@ -121,7 +133,7 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
   private nominatimEndpoint: string;
 
   constructor(config?: GeoapifyAdapterConfig) {
-    this.apiKey = config?.apiKey || process.env.GEOAPIFY_API_KEY;
+    this.apiKey = config?.apiKey !== undefined ? config.apiKey : process.env.GEOAPIFY_API_KEY;
     this.endpoint = config?.endpoint || 'https://api.geoapify.com/v2/places';
     this.userAgent =
       config?.userAgent ||
@@ -386,55 +398,106 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
         continue;
       }
 
-      // Address extraction
-      let rawAddress = props.formatted?.trim();
-      if (!rawAddress) {
-        const addrLines = [props.address_line1, props.address_line2].filter(Boolean) as string[];
-        if (addrLines.length > 0) {
-          rawAddress = addrLines.join(', ').trim();
-        }
-      }
+      // Canonical address construction from structured fields with fallback
+      const canonicalAddress = normalizeStructuredAddress({
+        housenumber: props.housenumber,
+        street: props.street,
+        address_line1: props.address_line1,
+        address_line2: props.address_line2,
+        city: props.city,
+        state: props.state,
+        postcode: props.postcode,
+        country: props.country,
+        formatted: props.formatted,
+      });
 
-      // Contact phone extraction: properties.contact.phone -> properties.phone -> datasource.raw
-      const rawPhone =
+      // Contact phone extraction & normalization
+      const rawPhoneStr =
         props.contact?.phone?.trim() ||
         props.phone?.trim() ||
         props.datasource?.raw?.phone?.trim() ||
         props.datasource?.raw?.['contact:phone']?.trim() ||
         undefined;
 
-      // Website extraction: properties.website -> properties.contact.website -> datasource.raw
-      const rawWebsite =
+      const phones = normalizePhones(rawPhoneStr);
+
+      // Contact email extraction & normalization
+      const rawEmail =
+        props.contact?.email?.trim() ||
+        props.email?.trim() ||
+        props.datasource?.raw?.email?.trim() ||
+        props.datasource?.raw?.['contact:email']?.trim() ||
+        undefined;
+
+      // Website extraction & domain normalization
+      const rawWebsiteStr =
         props.website?.trim() ||
         props.contact?.website?.trim() ||
         props.datasource?.raw?.website?.trim() ||
         props.datasource?.raw?.url?.trim() ||
         undefined;
 
-      // Place ID / External ID
+      const web = normalizeWebsiteAndDomain(rawWebsiteStr);
+
+      // Place ID / External ID preservation
       const externalId = props.place_id ? `geoapify_${props.place_id}` : `geoapify_${Date.now()}_${i}`;
 
-      const latitude = props.lat ?? feat.geometry?.coordinates?.[1];
-      const longitude = props.lon ?? feat.geometry?.coordinates?.[0];
+      // Coordinate extraction & validation from props.lat/lon or geometry.coordinates [lon, lat]
+      const rawLat = props.lat ?? feat.geometry?.coordinates?.[1];
+      const rawLon = props.lon ?? feat.geometry?.coordinates?.[0];
+      const coords = validateCoordinates(rawLat, rawLon);
+
+      // Deterministic targeted Google Maps search URL
+      const mapsUrl = buildTargetedMapsUrl({
+        businessName: rawName.trim(),
+        address: canonicalAddress,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+      });
+
+      // Objective data quality classification
+      const dataQuality = classifyDataQuality({
+        businessName: rawName.trim(),
+        address: canonicalAddress,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        phone: phones.primaryPhone,
+        email: rawEmail,
+        websiteUrl: web.websiteUrl,
+        domain: web.domain,
+      });
 
       candidates.push({
         rawId: externalId,
         rawName: rawName.trim(),
-        rawAddress: rawAddress && rawAddress.length > 0 ? rawAddress : undefined,
-        rawPhone: rawPhone && rawPhone.length > 0 ? rawPhone : undefined,
-        rawWebsite: rawWebsite && rawWebsite.length > 0 ? rawWebsite : undefined,
+        rawAddress: canonicalAddress,
+        rawPhone: phones.primaryPhone,
+        rawEmail,
+        rawWebsite: web.websiteUrl,
         rawCategory: props.categories?.[0] || query.niche,
         metadata: {
           placeId: props.place_id,
           categories: props.categories,
-          latitude,
-          longitude,
+          latitude: coords.latitude,
+          longitude: coords.longitude,
           country: props.country,
           countryCode: props.country_code,
           city: props.city,
+          state: props.state,
           postcode: props.postcode,
           street: props.street,
           housenumber: props.housenumber,
+          addressLine1: props.address_line1,
+          addressLine2: props.address_line2,
+          formattedAddress: props.formatted,
+          canonicalAddress,
+          primaryPhone: phones.primaryPhone,
+          additionalPhones: phones.additionalPhones,
+          email: rawEmail,
+          websiteUrl: web.websiteUrl,
+          domain: web.domain,
+          mapsUrl,
+          dataQuality,
         },
       });
 
@@ -450,25 +513,102 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
    * Normalizes raw scraped/API data into standard closeVDS candidate structure.
    */
   normalizeCandidate(raw: RawLeadCandidate): NormalizedLeadCandidate {
-    let domain: string | undefined;
-    if (raw.rawWebsite) {
-      try {
-        const parsed = new URL(raw.rawWebsite);
-        domain = parsed.hostname.replace(/^www\./, '').toLowerCase();
-      } catch {
-        domain = raw.rawWebsite.toLowerCase().trim();
+    const meta = (raw.metadata || {}) as Record<string, unknown>;
+
+    // 1. Domain & Website resolution
+    let domain: string | undefined = typeof meta.domain === 'string' ? meta.domain : undefined;
+    let websiteUrl: string | undefined = typeof meta.websiteUrl === 'string' ? meta.websiteUrl : undefined;
+
+    if (!domain && (raw.rawWebsite || websiteUrl)) {
+      const normWeb = normalizeWebsiteAndDomain(raw.rawWebsite || websiteUrl);
+      domain = normWeb.domain;
+      websiteUrl = normWeb.websiteUrl;
+    }
+
+    // 2. Address resolution
+    const normalizedAddress =
+      typeof meta.canonicalAddress === 'string'
+        ? meta.canonicalAddress
+        : raw.rawAddress?.trim() || undefined;
+
+    // 3. Phone & Additional Phones resolution
+    const metaAdditional = Array.isArray(meta.additionalPhones)
+      ? (meta.additionalPhones as string[])
+      : [];
+    let normalizedPhone = typeof meta.primaryPhone === 'string' ? meta.primaryPhone : undefined;
+    let additionalPhones = metaAdditional;
+
+    if (!normalizedPhone && raw.rawPhone) {
+      const normPhones = normalizePhones(raw.rawPhone);
+      normalizedPhone = normPhones.primaryPhone;
+      if (additionalPhones.length === 0) {
+        additionalPhones = normPhones.additionalPhones;
       }
     }
 
+    // 4. Coordinates validation
+    const coords = validateCoordinates(
+      meta.latitude ?? (meta as any).lat,
+      meta.longitude ?? (meta as any).lon
+    );
+
+    // 5. Place ID preservation
+    const placeId =
+      typeof meta.placeId === 'string'
+        ? meta.placeId
+        : raw.rawId.startsWith('geoapify_')
+        ? raw.rawId.replace(/^geoapify_/, '')
+        : undefined;
+
+    // 6. Email resolution
+    const email =
+      typeof meta.email === 'string'
+        ? meta.email
+        : raw.rawEmail?.trim() || undefined;
+
+    // 7. Maps URL
+    const mapsUrl =
+      typeof meta.mapsUrl === 'string'
+        ? meta.mapsUrl
+        : buildTargetedMapsUrl({
+            businessName: raw.rawName.trim(),
+            address: normalizedAddress,
+            latitude: coords.latitude,
+            longitude: coords.longitude,
+          });
+
+    // 8. Data Quality classification
+    const dataQuality: LeadDataQuality =
+      typeof meta.dataQuality === 'string' &&
+      (meta.dataQuality === 'COMPLETE' || meta.dataQuality === 'PARTIAL' || meta.dataQuality === 'MINIMAL')
+        ? (meta.dataQuality as LeadDataQuality)
+        : classifyDataQuality({
+            businessName: raw.rawName.trim(),
+            address: normalizedAddress,
+            latitude: coords.latitude,
+            longitude: coords.longitude,
+            phone: normalizedPhone,
+            email,
+            websiteUrl,
+            domain,
+          });
+
     return {
       businessName: raw.rawName.trim(),
-      normalizedAddress: raw.rawAddress?.trim() || undefined,
-      normalizedPhone: raw.rawPhone?.trim() || undefined,
+      normalizedAddress,
+      normalizedPhone,
+      additionalPhones: additionalPhones.length > 0 ? additionalPhones : undefined,
+      email,
       domain,
-      websiteUrl: raw.rawWebsite?.trim() || undefined,
+      websiteUrl: websiteUrl || raw.rawWebsite?.trim() || undefined,
       category: raw.rawCategory?.trim() || undefined,
       sourceProvider: this.providerName,
       sourceExternalId: raw.rawId,
+      placeId,
+      latitude: coords.latitude,
+      longitude: coords.longitude,
+      mapsUrl,
+      dataQuality,
     };
   }
 }

@@ -331,6 +331,11 @@ export async function runGeoapifyDiscoveryTests() {
     assert.equal(cand1.websiteUrl, 'https://www.stpaulsdental.co.uk');
     assert.equal(cand1.sourceProvider, 'Geoapify');
     assert.equal(cand1.sourceExternalId, 'geoapify_geo_place_101');
+    assert.equal(cand1.placeId, 'geo_place_101');
+    assert.equal(cand1.latitude, 51.5074);
+    assert.equal(cand1.longitude, -0.1278);
+    assert.ok(cand1.mapsUrl?.includes('St.%20Pauls%20Dental%20Care'));
+    assert.equal(cand1.dataQuality, 'COMPLETE');
 
     // Candidate 2 has no website
     const cand2 = adapter.normalizeCandidate(rawCandidates[1]);
@@ -338,12 +343,14 @@ export async function runGeoapifyDiscoveryTests() {
     assert.equal(cand2.normalizedPhone, '+44 20 7946 0456');
     assert.equal(cand2.domain, undefined);
     assert.equal(cand2.websiteUrl, undefined);
+    assert.equal(cand2.dataQuality, 'COMPLETE'); // has address, coords, phone
 
     // Candidate 3 has no phone
     const cand3 = adapter.normalizeCandidate(rawCandidates[2]);
     assert.equal(cand3.businessName, 'Holborn Family Dentistry');
     assert.equal(cand3.normalizedPhone, undefined);
     assert.equal(cand3.domain, 'holborndental.co.uk');
+    assert.equal(cand3.dataQuality, 'COMPLETE'); // has address, coords, website
     console.log('✓ Test 3 Passed: Normalization preserves fields and keeps missing fields null/undefined');
 
     // --------------------------------------------------------------------------

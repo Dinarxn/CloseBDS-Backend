@@ -178,18 +178,41 @@ export class DiscoveryDomainService {
           Object.assign(existing, enrichData);
         }
 
+        // Build metadata payload preserving defined fields
+        const sourcePayload: Record<string, unknown> = {
+          niche: query.niche,
+          location: query.location,
+        };
+        if (normalized.placeId) sourcePayload.placeId = normalized.placeId;
+        if (normalized.latitude !== undefined) sourcePayload.latitude = normalized.latitude;
+        if (normalized.longitude !== undefined) sourcePayload.longitude = normalized.longitude;
+        if (normalized.mapsUrl) sourcePayload.mapsUrl = normalized.mapsUrl;
+        if (normalized.dataQuality) sourcePayload.dataQuality = normalized.dataQuality;
+        if (normalized.additionalPhones && normalized.additionalPhones.length > 0) {
+          sourcePayload.additionalPhones = normalized.additionalPhones;
+        }
+        if (normalized.email) sourcePayload.email = normalized.email;
+
         // Preserve primary LeadSource and record additional provider source
         await this.leadSourceRepo.recordDiscoverySource(existing.id, workspaceId, {
           provider: normalized.sourceProvider,
           externalId: normalized.sourceExternalId,
-          queryPayload: {
-            niche: query.niche,
-            location: query.location,
-          },
+          queryPayload: sourcePayload,
         });
 
         continue;
       }
+
+      const contacts = normalized.email
+        ? [
+            {
+              fullName: normalized.businessName,
+              email: normalized.email,
+              phone: normalized.normalizedPhone,
+              isPrimary: true,
+            },
+          ]
+        : undefined;
 
       // Persist new candidate lead
       const lead = await this.leadRepo.create({
@@ -200,16 +223,29 @@ export class DiscoveryDomainService {
         phone: normalized.normalizedPhone,
         address: normalized.normalizedAddress,
         status: 'NEW',
+        ...(contacts ? { contacts } : {}),
       });
+
+      // Build metadata payload preserving defined fields
+      const newSourcePayload: Record<string, unknown> = {
+        niche: query.niche,
+        location: query.location,
+      };
+      if (normalized.placeId) newSourcePayload.placeId = normalized.placeId;
+      if (normalized.latitude !== undefined) newSourcePayload.latitude = normalized.latitude;
+      if (normalized.longitude !== undefined) newSourcePayload.longitude = normalized.longitude;
+      if (normalized.mapsUrl) newSourcePayload.mapsUrl = normalized.mapsUrl;
+      if (normalized.dataQuality) newSourcePayload.dataQuality = normalized.dataQuality;
+      if (normalized.additionalPhones && normalized.additionalPhones.length > 0) {
+        newSourcePayload.additionalPhones = normalized.additionalPhones;
+      }
+      if (normalized.email) newSourcePayload.email = normalized.email;
 
       // Persist primary lead source tracking metadata
       await this.leadSourceRepo.recordDiscoverySource(lead.id, workspaceId, {
         provider: normalized.sourceProvider,
         externalId: normalized.sourceExternalId,
-        queryPayload: {
-          niche: query.niche,
-          location: query.location,
-        },
+        queryPayload: newSourcePayload,
       });
 
       persistedCount++;
