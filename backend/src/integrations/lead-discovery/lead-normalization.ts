@@ -22,6 +22,11 @@ export interface NormalizedPhonesResult {
   additionalPhones: string[];
 }
 
+export interface NormalizedEmailsResult {
+  email?: string;
+  additionalEmails: string[];
+}
+
 export interface NormalizedWebsiteResult {
   websiteUrl?: string;
   domain?: string;
@@ -48,6 +53,33 @@ export interface DataQualityClassificationInput {
   email?: string | null;
   websiteUrl?: string | null;
   domain?: string | null;
+}
+
+export interface PlaceDetailsRawProperties {
+  name?: string;
+  website?: string;
+  website_other?: string[] | string;
+  contact?: {
+    phone?: string;
+    phone_other?: string[] | string;
+    email?: string;
+    email_other?: string[] | string;
+    website?: string;
+  };
+  housenumber?: string;
+  street?: string;
+  address_line1?: string;
+  address_line2?: string;
+  city?: string;
+  state?: string;
+  postcode?: string;
+  country?: string;
+  country_code?: string;
+  formatted?: string;
+  lat?: number;
+  lon?: number;
+  categories?: string[];
+  [key: string]: unknown;
 }
 
 const GENERIC_SOCIAL_DOMAINS = new Set([
@@ -391,4 +423,280 @@ export function classifyDataQuality(input: DataQualityClassificationInput): Lead
 
   // MINIMAL: Name only or very weak location/contact
   return 'MINIMAL';
+}
+
+/**
+ * Normalizes email address(es).
+ * Validates structure, lowercases, deduplicates case-insensitively,
+ * deterministically selects a primary email and returns additional emails.
+ * Never invents, guesses, or fabricates emails.
+ */
+export function normalizeEmails(
+  primaryCandidate?: string | null,
+  additionalCandidates?: Array<string | null | undefined> | string | null
+): NormalizedEmailsResult {
+  const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+
+  const rawList: string[] = [];
+
+  if (primaryCandidate && typeof primaryCandidate === 'string') {
+    rawList.push(...primaryCandidate.split(/[;,\n|]+/).map((s) => s.trim()).filter(Boolean));
+  }
+
+  if (Array.isArray(additionalCandidates)) {
+    for (const item of additionalCandidates) {
+      if (item && typeof item === 'string') {
+        rawList.push(...item.split(/[;,\n|]+/).map((s) => s.trim()).filter(Boolean));
+      }
+    }
+  } else if (additionalCandidates && typeof additionalCandidates === 'string') {
+    rawList.push(...additionalCandidates.split(/[;,\n|]+/).map((s) => s.trim()).filter(Boolean));
+  }
+
+  const seen = new Set<string>();
+  const validEmails: string[] = [];
+
+  for (const raw of rawList) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+
+    if (!EMAIL_REGEX.test(trimmed)) {
+      continue;
+    }
+
+    const lower = trimmed.toLowerCase();
+    if (seen.has(lower)) {
+      continue;
+    }
+    seen.add(lower);
+    validEmails.push(lower);
+  }
+
+  if (validEmails.length === 0) {
+    return { email: undefined, additionalEmails: [] };
+  }
+
+  return {
+    email: validEmails[0],
+    additionalEmails: validEmails.slice(1),
+  };
+}
+
+export interface SafeEnrichmentMergeInput {
+  existingName: string;
+  existingAddress?: string | null;
+  existingPhone?: string | null;
+  existingAdditionalPhones?: string[];
+  existingWebsite?: string | null;
+  existingDomain?: string | null;
+  existingLatitude?: number | null;
+  existingLongitude?: number | null;
+  existingPlaceId?: string | null;
+  existingEmail?: string | null;
+  existingAdditionalEmails?: string[];
+  details?: PlaceDetailsRawProperties | null;
+}
+
+export interface SafeEnrichmentMergeResult {
+  businessName: string;
+  canonicalAddress?: string;
+  primaryPhone?: string;
+  additionalPhones: string[];
+  email?: string;
+  additionalEmails: string[];
+  websiteUrl?: string;
+  additionalWebsites: string[];
+  domain?: string;
+  latitude?: number;
+  longitude?: number;
+  placeId?: string;
+  mapsUrl?: string;
+  dataQuality: LeadDataQuality;
+  placeDetailsEnriched: boolean;
+}
+
+/**
+ * Safely and additively merges Place Details into existing lead candidate data.
+ * Existing valid information is never destructively overwritten with null/empty values.
+ * No emails, phones, or websites are fabricated or inferred.
+ */
+export function safeMergePlaceDetails(input: SafeEnrichmentMergeInput): SafeEnrichmentMergeResult {
+  const details = input.details || {};
+  const hasDetails = Boolean(input.details && Object.keys(input.details).length > 0);
+
+  // 1. Business Name: preserve existing trusted name, fallback to details name
+  const businessName = input.existingName?.trim() || details.name?.trim() || 'Unnamed Business';
+
+  // 2. Structured Address: build details address and merge conservatively
+  let detailsAddress: string | undefined;
+  if (hasDetails) {
+    detailsAddress = normalizeStructuredAddress({
+      housenumber: details.housenumber,
+      street: details.street,
+      address_line1: details.address_line1,
+      address_line2: details.address_line2,
+      city: details.city,
+      state: details.state,
+      postcode: details.postcode,
+      country: details.country,
+      formatted: details.formatted,
+    });
+  }
+
+  // Preserve existing address if already valid and more detailed, or use enriched details
+  let canonicalAddress: string | undefined;
+  if (input.existingAddress && input.existingAddress.trim().length > 0) {
+    // If details address has more information (e.g. includes postcode while existing didn't)
+    if (detailsAddress && detailsAddress.length > input.existingAddress.length) {
+      canonicalAddress = detailsAddress;
+    } else {
+      canonicalAddress = input.existingAddress.trim();
+    }
+  } else {
+    canonicalAddress = detailsAddress;
+  }
+
+  // 3. Phone Enrichment: merge existing + details contact.phone + details contact.phone_other + top-level / datasource phone
+  const phoneCandidates: string[] = [];
+  if (input.existingPhone) {
+    phoneCandidates.push(input.existingPhone);
+  }
+  if (Array.isArray(input.existingAdditionalPhones)) {
+    phoneCandidates.push(...input.existingAdditionalPhones);
+  }
+  if (details.contact?.phone) {
+    phoneCandidates.push(details.contact.phone);
+  }
+  if (typeof (details as any).phone === 'string') {
+    phoneCandidates.push((details as any).phone);
+  }
+  const rawDsPhone = (details.datasource as any)?.raw?.phone || (details.datasource as any)?.raw?.['contact:phone'];
+  if (typeof rawDsPhone === 'string') {
+    phoneCandidates.push(rawDsPhone);
+  }
+  if (Array.isArray(details.contact?.phone_other)) {
+    for (const p of details.contact.phone_other) {
+      if (p) phoneCandidates.push(p);
+    }
+  } else if (details.contact?.phone_other && typeof details.contact.phone_other === 'string') {
+    phoneCandidates.push(details.contact.phone_other);
+  }
+
+  const mergedPhones = normalizePhones(phoneCandidates.join(';'));
+  const primaryPhone = mergedPhones.primaryPhone;
+  const additionalPhones = mergedPhones.additionalPhones;
+
+  // 4. Email Enrichment: merge existing + details contact.email + details contact.email_other + top-level / datasource email
+  const rawDsEmail = (details.datasource as any)?.raw?.email || (details.datasource as any)?.raw?.['contact:email'];
+  const detailsEmail = details.contact?.email || (typeof (details as any).email === 'string' ? (details as any).email : undefined) || (typeof rawDsEmail === 'string' ? rawDsEmail : undefined);
+  const primaryEmailCandidate = input.existingEmail || detailsEmail || undefined;
+  const additionalEmailCandidates: string[] = [];
+  if (Array.isArray(input.existingAdditionalEmails)) {
+    additionalEmailCandidates.push(...input.existingAdditionalEmails);
+  }
+  if (input.existingEmail && detailsEmail && input.existingEmail.toLowerCase() !== detailsEmail.toLowerCase()) {
+    additionalEmailCandidates.push(detailsEmail);
+  }
+  if (Array.isArray(details.contact?.email_other)) {
+    for (const e of details.contact.email_other) {
+      if (e) additionalEmailCandidates.push(e);
+    }
+  } else if (details.contact?.email_other && typeof details.contact.email_other === 'string') {
+    additionalEmailCandidates.push(details.contact.email_other);
+  }
+
+  const mergedEmails = normalizeEmails(primaryEmailCandidate, additionalEmailCandidates);
+
+  // 5. Website & Domain Enrichment:
+  // Primary website: prefer existing valid official website or details website
+  const webCandidates: string[] = [];
+  if (input.existingWebsite) {
+    webCandidates.push(input.existingWebsite);
+  }
+  if (details.website) {
+    webCandidates.push(details.website);
+  }
+  if (details.contact?.website) {
+    webCandidates.push(details.contact.website);
+  }
+  const rawDsWeb = (details.datasource as any)?.raw?.website || (details.datasource as any)?.raw?.['contact:website'] || (details.datasource as any)?.raw?.url;
+  if (typeof rawDsWeb === 'string') {
+    webCandidates.push(rawDsWeb);
+  }
+  if (Array.isArray(details.website_other)) {
+    for (const w of details.website_other) {
+      if (w) webCandidates.push(w);
+    }
+  } else if (details.website_other && typeof details.website_other === 'string') {
+    webCandidates.push(details.website_other);
+  }
+
+  let websiteUrl: string | undefined;
+  let domain: string | undefined = input.existingDomain || undefined;
+  const additionalWebsites: string[] = [];
+
+  for (const rawW of webCandidates) {
+    const norm = normalizeWebsiteAndDomain(rawW);
+    if (!norm.websiteUrl || !norm.domain) {
+      continue;
+    }
+    if (!websiteUrl) {
+      websiteUrl = norm.websiteUrl;
+      domain = domain || norm.domain;
+    } else if (norm.websiteUrl !== websiteUrl && !additionalWebsites.includes(norm.websiteUrl)) {
+      additionalWebsites.push(norm.websiteUrl);
+    }
+  }
+
+  // 6. Coordinates: preserve existing valid coordinates, fallback to details coords
+  const existingCoords = validateCoordinates(input.existingLatitude, input.existingLongitude);
+  let latitude = existingCoords.latitude;
+  let longitude = existingCoords.longitude;
+
+  if (latitude === undefined || longitude === undefined) {
+    const detailsCoords = validateCoordinates(details.lat, details.lon);
+    if (latitude === undefined) latitude = detailsCoords.latitude;
+    if (longitude === undefined) longitude = detailsCoords.longitude;
+  }
+
+  // 7. Place ID: preserve existing
+  const placeId = input.existingPlaceId || undefined;
+
+  // 8. Targeted Maps URL
+  const mapsUrl = buildTargetedMapsUrl({
+    businessName,
+    address: canonicalAddress,
+    latitude,
+    longitude,
+  });
+
+  // 9. Data Quality Classification
+  const dataQuality = classifyDataQuality({
+    businessName,
+    address: canonicalAddress,
+    latitude,
+    longitude,
+    phone: primaryPhone,
+    email: mergedEmails.email,
+    websiteUrl,
+    domain,
+  });
+
+  return {
+    businessName,
+    canonicalAddress,
+    primaryPhone,
+    additionalPhones,
+    email: mergedEmails.email,
+    additionalEmails: mergedEmails.additionalEmails,
+    websiteUrl,
+    additionalWebsites,
+    domain,
+    latitude,
+    longitude,
+    placeId,
+    mapsUrl,
+    dataQuality,
+    placeDetailsEnriched: hasDetails,
+  };
 }

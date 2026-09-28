@@ -192,6 +192,15 @@ export class DiscoveryDomainService {
           sourcePayload.additionalPhones = normalized.additionalPhones;
         }
         if (normalized.email) sourcePayload.email = normalized.email;
+        if (normalized.additionalEmails && normalized.additionalEmails.length > 0) {
+          sourcePayload.additionalEmails = normalized.additionalEmails;
+        }
+        if (normalized.additionalWebsites && normalized.additionalWebsites.length > 0) {
+          sourcePayload.additionalWebsites = normalized.additionalWebsites;
+        }
+        if (normalized.placeDetailsEnriched !== undefined) {
+          sourcePayload.placeDetailsEnriched = normalized.placeDetailsEnriched;
+        }
 
         // Preserve primary LeadSource and record additional provider source
         await this.leadSourceRepo.recordDiscoverySource(existing.id, workspaceId, {
@@ -240,6 +249,15 @@ export class DiscoveryDomainService {
         newSourcePayload.additionalPhones = normalized.additionalPhones;
       }
       if (normalized.email) newSourcePayload.email = normalized.email;
+      if (normalized.additionalEmails && normalized.additionalEmails.length > 0) {
+        newSourcePayload.additionalEmails = normalized.additionalEmails;
+      }
+      if (normalized.additionalWebsites && normalized.additionalWebsites.length > 0) {
+        newSourcePayload.additionalWebsites = normalized.additionalWebsites;
+      }
+      if (normalized.placeDetailsEnriched !== undefined) {
+        newSourcePayload.placeDetailsEnriched = normalized.placeDetailsEnriched;
+      }
 
       // Persist primary lead source tracking metadata
       await this.leadSourceRepo.recordDiscoverySource(lead.id, workspaceId, {

@@ -26,8 +26,10 @@ export interface NormalizedLeadCandidate {
   normalizedPhone?: string;
   additionalPhones?: string[];
   email?: string;
+  additionalEmails?: string[];
   domain?: string;
   websiteUrl?: string;
+  additionalWebsites?: string[];
   category?: string;
   sourceProvider: string;
   sourceExternalId: string;
@@ -36,6 +38,7 @@ export interface NormalizedLeadCandidate {
   longitude?: number;
   mapsUrl?: string;
   dataQuality?: import('./lead-normalization.js').LeadDataQuality;
+  placeDetailsEnriched?: boolean;
 }
 
 /**
@@ -57,15 +60,22 @@ export {
   type LeadDataQuality,
   type StructuredAddressInput,
   type NormalizedPhonesResult,
+  type NormalizedEmailsResult,
   type NormalizedWebsiteResult,
   type ValidatedCoordinates,
   type TargetedMapsUrlInput,
   type DataQualityClassificationInput,
+  type PlaceDetailsRawProperties,
+  type SafeEnrichmentMergeInput,
+  type SafeEnrichmentMergeResult,
   validateCoordinates,
   normalizeStructuredAddress,
   normalizePhones,
+  normalizeEmails,
   normalizeWebsiteAndDomain,
   buildTargetedMapsUrl,
   classifyDataQuality,
+  safeMergePlaceDetails,
 } from './lead-normalization.js';
+
 

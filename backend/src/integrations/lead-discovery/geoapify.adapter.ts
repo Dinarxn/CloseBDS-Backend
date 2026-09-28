@@ -12,17 +12,21 @@ import {
 } from '../core/provider.types.js';
 import {
   type LeadDataQuality,
+  type PlaceDetailsRawProperties,
   validateCoordinates,
   normalizeStructuredAddress,
   normalizePhones,
   normalizeWebsiteAndDomain,
   buildTargetedMapsUrl,
   classifyDataQuality,
+  safeMergePlaceDetails,
 } from './lead-normalization.js';
 
 export interface GeoapifyAdapterConfig {
   apiKey?: string;
   endpoint?: string;
+  placeDetailsEndpoint?: string;
+  enablePlaceDetails?: boolean;
   userAgent?: string;
   nominatimEndpoint?: string;
 }
@@ -129,18 +133,119 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
   public readonly category = 'LEAD_DISCOVERY' as const;
   private apiKey?: string;
   private endpoint: string;
+  private placeDetailsEndpoint: string;
+  private enablePlaceDetails: boolean;
   private userAgent: string;
   private nominatimEndpoint: string;
+  private placeDetailsCache: Map<string, PlaceDetailsRawProperties> = new Map();
 
   constructor(config?: GeoapifyAdapterConfig) {
     this.apiKey = config?.apiKey !== undefined ? config.apiKey : process.env.GEOAPIFY_API_KEY;
     this.endpoint = config?.endpoint || 'https://api.geoapify.com/v2/places';
+    this.placeDetailsEndpoint =
+      config?.placeDetailsEndpoint || 'https://api.geoapify.com/v2/place-details';
+    this.enablePlaceDetails =
+      config?.enablePlaceDetails !== undefined ? config.enablePlaceDetails : true;
     this.userAgent =
       config?.userAgent ||
       process.env.GEOAPIFY_USER_AGENT ||
       'closeVDS-LeadDiscovery/1.0 (https://github.com/closevds)';
     this.nominatimEndpoint =
       config?.nominatimEndpoint || 'https://nominatim.openstreetmap.org/search';
+  }
+
+  /**
+   * Clears the in-memory Place Details cache.
+   */
+  public clearPlaceDetailsCache(): void {
+    this.placeDetailsCache.clear();
+  }
+
+  /**
+   * Retrieves a cached Place Details result by place_id if present.
+   */
+  public getCachedPlaceDetails(placeId: string): PlaceDetailsRawProperties | undefined {
+    return this.placeDetailsCache.get(placeId.trim());
+  }
+
+  /**
+   * Fetches place details from Geoapify Place Details API v2 by place_id.
+   * Uses features=details for minimal, focused contact & address enrichment.
+   * Non-blocking: returns null on any network/HTTP error or missing features without failing discovery.
+   * Never prints or leaks the API key in logs, errors, or exceptions.
+   * Caches successful responses in memory to prevent duplicate API requests for the same place_id.
+   */
+  public async fetchPlaceDetails(placeId: string): Promise<PlaceDetailsRawProperties | null> {
+    const cleanId = placeId?.trim();
+    if (!cleanId || !this.isConfigured() || !this.enablePlaceDetails) {
+      return null;
+    }
+
+    if (this.placeDetailsCache.has(cleanId)) {
+      return this.placeDetailsCache.get(cleanId)!;
+    }
+
+    const params = new URLSearchParams({
+      id: cleanId,
+      features: 'details',
+      apiKey: this.apiKey!,
+    });
+
+    try {
+      const res = await fetch(`${this.placeDetailsEndpoint}?${params.toString()}`, {
+        method: 'GET',
+        headers: {
+          'User-Agent': this.userAgent,
+          Accept: 'application/json',
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (!res.ok) {
+        return null;
+      }
+
+      const data = (await res.json()) as any;
+      if (!data) {
+        return null;
+      }
+
+      let props: PlaceDetailsRawProperties | null = null;
+      if (Array.isArray(data.features) && data.features.length > 0 && data.features[0]?.properties) {
+        props = data.features[0].properties as PlaceDetailsRawProperties;
+        if (props && props.lat === undefined && Array.isArray(data.features[0].geometry?.coordinates)) {
+          props.lon = data.features[0].geometry.coordinates[0];
+          props.lat = data.features[0].geometry.coordinates[1];
+        }
+      } else if (data.properties && typeof data.properties === 'object') {
+        props = data.properties as PlaceDetailsRawProperties;
+      }
+
+      if (props) {
+        this.placeDetailsCache.set(cleanId, props);
+        return props;
+      }
+
+      return null;
+    } catch {
+      // Safe non-blocking failure: never rethrow or leak apiKey
+      return null;
+    }
+  }
+
+  /**
+   * Safe JSON serialization: prevents accidental exposure of apiKey in logs or JSON strings.
+   */
+  public toJSON(): Record<string, unknown> {
+    return {
+      providerName: this.providerName,
+      category: this.category,
+      endpoint: this.endpoint,
+      placeDetailsEndpoint: this.placeDetailsEndpoint,
+      enablePlaceDetails: this.enablePlaceDetails,
+      userAgent: this.userAgent,
+      isConfigured: this.isConfigured(),
+    };
   }
 
   isConfigured(): boolean {
@@ -447,39 +552,44 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
       const rawLon = props.lon ?? feat.geometry?.coordinates?.[0];
       const coords = validateCoordinates(rawLat, rawLon);
 
-      // Deterministic targeted Google Maps search URL
-      const mapsUrl = buildTargetedMapsUrl({
-        businessName: rawName.trim(),
-        address: canonicalAddress,
-        latitude: coords.latitude,
-        longitude: coords.longitude,
-      });
+      // Phase B2: Enrich with Place Details if place_id exists and enrichment enabled
+      let placeDetailsProps: PlaceDetailsRawProperties | null = null;
+      if (props.place_id && this.enablePlaceDetails) {
+        try {
+          placeDetailsProps = await this.fetchPlaceDetails(props.place_id);
+        } catch {
+          placeDetailsProps = null;
+        }
+      }
 
-      // Objective data quality classification
-      const dataQuality = classifyDataQuality({
-        businessName: rawName.trim(),
-        address: canonicalAddress,
-        latitude: coords.latitude,
-        longitude: coords.longitude,
-        phone: phones.primaryPhone,
-        email: rawEmail,
-        websiteUrl: web.websiteUrl,
-        domain: web.domain,
+      // Safe non-destructive merge of Places API candidate + Place Details
+      const merged = safeMergePlaceDetails({
+        existingName: rawName.trim(),
+        existingAddress: canonicalAddress,
+        existingPhone: phones.primaryPhone,
+        existingAdditionalPhones: phones.additionalPhones,
+        existingWebsite: web.websiteUrl,
+        existingDomain: web.domain,
+        existingLatitude: coords.latitude,
+        existingLongitude: coords.longitude,
+        existingPlaceId: props.place_id,
+        existingEmail: rawEmail,
+        details: placeDetailsProps,
       });
 
       candidates.push({
         rawId: externalId,
-        rawName: rawName.trim(),
-        rawAddress: canonicalAddress,
-        rawPhone: phones.primaryPhone,
-        rawEmail,
-        rawWebsite: web.websiteUrl,
+        rawName: merged.businessName,
+        rawAddress: merged.canonicalAddress,
+        rawPhone: merged.primaryPhone,
+        rawEmail: merged.email,
+        rawWebsite: merged.websiteUrl,
         rawCategory: props.categories?.[0] || query.niche,
         metadata: {
-          placeId: props.place_id,
+          placeId: merged.placeId,
           categories: props.categories,
-          latitude: coords.latitude,
-          longitude: coords.longitude,
+          latitude: merged.latitude,
+          longitude: merged.longitude,
           country: props.country,
           countryCode: props.country_code,
           city: props.city,
@@ -490,14 +600,17 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
           addressLine1: props.address_line1,
           addressLine2: props.address_line2,
           formattedAddress: props.formatted,
-          canonicalAddress,
-          primaryPhone: phones.primaryPhone,
-          additionalPhones: phones.additionalPhones,
-          email: rawEmail,
-          websiteUrl: web.websiteUrl,
-          domain: web.domain,
-          mapsUrl,
-          dataQuality,
+          canonicalAddress: merged.canonicalAddress,
+          primaryPhone: merged.primaryPhone,
+          additionalPhones: merged.additionalPhones,
+          email: merged.email,
+          additionalEmails: merged.additionalEmails,
+          websiteUrl: merged.websiteUrl,
+          additionalWebsites: merged.additionalWebsites,
+          domain: merged.domain,
+          mapsUrl: merged.mapsUrl,
+          dataQuality: merged.dataQuality,
+          placeDetailsEnriched: merged.placeDetailsEnriched,
         },
       });
 
@@ -566,6 +679,22 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
         ? meta.email
         : raw.rawEmail?.trim() || undefined;
 
+    // 6b. Additional emails resolution
+    const metaAdditionalEmails = Array.isArray(meta.additionalEmails)
+      ? (meta.additionalEmails as string[])
+      : [];
+
+    // 6c. Additional websites resolution
+    const metaAdditionalWebsites = Array.isArray(meta.additionalWebsites)
+      ? (meta.additionalWebsites as string[])
+      : [];
+
+    // 6d. Place Details enriched flag
+    const placeDetailsEnriched =
+      typeof meta.placeDetailsEnriched === 'boolean'
+        ? meta.placeDetailsEnriched
+        : undefined;
+
     // 7. Maps URL
     const mapsUrl =
       typeof meta.mapsUrl === 'string'
@@ -599,8 +728,10 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
       normalizedPhone,
       additionalPhones: additionalPhones.length > 0 ? additionalPhones : undefined,
       email,
+      additionalEmails: metaAdditionalEmails.length > 0 ? metaAdditionalEmails : undefined,
       domain,
       websiteUrl: websiteUrl || raw.rawWebsite?.trim() || undefined,
+      additionalWebsites: metaAdditionalWebsites.length > 0 ? metaAdditionalWebsites : undefined,
       category: raw.rawCategory?.trim() || undefined,
       sourceProvider: this.providerName,
       sourceExternalId: raw.rawId,
@@ -609,6 +740,7 @@ export class GeoapifyDiscoveryAdapter implements LeadDiscoveryService, BaseProvi
       longitude: coords.longitude,
       mapsUrl,
       dataQuality,
+      placeDetailsEnriched,
     };
   }
 }

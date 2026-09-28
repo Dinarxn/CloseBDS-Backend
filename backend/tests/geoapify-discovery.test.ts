@@ -291,9 +291,16 @@ export async function runGeoapifyDiscoveryTests() {
         });
       }
 
-      if (urlStr.includes('api.geoapify.com')) {
+      if (urlStr.includes('api.geoapify.com/v2/places') || (!urlStr.includes('place-details') && urlStr.includes('api.geoapify.com'))) {
         requestedGeoapifyUrl = urlStr;
         return new Response(mockGeoapifyDentalSuccess, {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      if (urlStr.includes('place-details')) {
+        return new Response(JSON.stringify({ type: 'FeatureCollection', features: [] }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
