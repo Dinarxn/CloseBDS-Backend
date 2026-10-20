@@ -204,6 +204,11 @@ export class SettingsService {
     const hasSendGrid = Boolean(process.env.SENDGRID_API_KEY && process.env.SENDGRID_API_KEY.trim().length > 0);
     const hasSerpApi = Boolean(process.env.SERPAPI_API_KEY && process.env.SERPAPI_API_KEY.trim().length > 0);
     const hasApify = Boolean(process.env.APIFY_API_TOKEN && process.env.APIFY_API_TOKEN.trim().length > 0);
+    const hasGeoapify = Boolean(process.env.GEOAPIFY_API_KEY && process.env.GEOAPIFY_API_KEY.trim().length > 0);
+    const hasWhatsApp = Boolean(
+      (process.env.WHATSAPP_ACCESS_TOKEN || process.env.META_WHATSAPP_TOKEN) &&
+      (process.env.WHATSAPP_PHONE_NUMBER_ID || process.env.META_PHONE_NUMBER_ID)
+    );
     const hasTwilio = Boolean(
       process.env.TWILIO_ACCOUNT_SID &&
       process.env.TWILIO_AUTH_TOKEN &&
@@ -255,11 +260,25 @@ export class SettingsService {
         features: ['Local B2B Business Discovery', 'Google Business Profile Enrichment'],
       },
       {
+        provider: 'Geoapify Places API',
+        category: 'LEAD_SCRAPING',
+        isConfigured: hasGeoapify,
+        status: hasGeoapify ? 'CONFIGURED' : 'NOT_CONFIGURED',
+        features: ['OSM-Powered Place Discovery', 'Geocoding & Place Details Enrichment'],
+      },
+      {
         provider: 'Apify Web Scraper',
         category: 'LEAD_SCRAPING',
         isConfigured: hasApify,
         status: hasApify ? 'CONFIGURED' : 'NOT_CONFIGURED',
         features: ['Website Technical Gaps Audit', 'Social Profile Discovery'],
+      },
+      {
+        provider: 'Meta WhatsApp Cloud API',
+        category: 'WHATSAPP',
+        isConfigured: hasWhatsApp,
+        status: hasWhatsApp ? 'CONFIGURED' : 'NOT_CONFIGURED',
+        features: ['Template Messages', 'Opt-In Conversational Outreach'],
       },
       {
         provider: 'Twilio',

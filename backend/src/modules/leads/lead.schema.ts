@@ -1,11 +1,20 @@
 import { z } from 'zod';
 
 export const leadStatusEnum = z.enum([
-  'NEW',
+  'DISCOVERED',
+  'IMPORTED',
+  'RESEARCH_PENDING',
+  'RESEARCHED',
+  'QUALIFICATION_PENDING',
   'QUALIFIED',
   'CALL_READY',
-  'DISQUALIFIED',
   'CONTACTED',
+  'INTERESTED',
+  'MEETING',
+  'WON',
+  'LOST',
+  'NEW',
+  'DISQUALIFIED',
   'REPLIED',
   'OPT_OUT',
 ]);
@@ -31,7 +40,7 @@ export const updateContactSchema = z.object({
 });
 
 export const createLeadSchema = z.object({
-  campaignId: z.string().uuid('Valid campaign ID is required'),
+  campaignId: z.string().uuid('Valid campaign ID is required').optional(),
   businessName: z.string().min(1, 'Business name is required').max(150),
   domain: z.string().max(255).optional(),
   phone: z.string().max(50).optional(),

@@ -27,7 +27,7 @@ export interface UserPreferences {
 
 export interface ProviderConfigStatus {
   provider: string;
-  category: 'AI_LLM' | 'EMAIL_DISPATCH' | 'LEAD_SCRAPING' | 'SEARCH' | 'CALLING';
+  category: 'AI_LLM' | 'EMAIL_DISPATCH' | 'LEAD_SCRAPING' | 'SEARCH' | 'CALLING' | 'WHATSAPP';
   isConfigured: boolean;
   status: 'CONFIGURED' | 'NOT_CONFIGURED';
   features: string[];

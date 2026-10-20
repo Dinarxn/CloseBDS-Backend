@@ -18,7 +18,7 @@ export const listOutreachQuerySchema = z.object({
   leadId: z.string().uuid().optional(),
   contactId: z.string().uuid().optional(),
   channel: z.enum(['EMAIL', 'WHATSAPP', 'CALL']).optional(),
-  status: z.enum(['DRAFT', 'APPROVED', 'QUEUED', 'SENT', 'REJECTED', 'FAILED']).optional(),
+  status: z.enum(['DRAFT', 'APPROVED', 'QUEUED', 'SENT', 'REJECTED', 'FAILED', 'CANCELLED']).optional(),
   search: z.string().max(100).optional(),
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),

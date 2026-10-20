@@ -24,6 +24,42 @@ export class LeadService {
   ) {}
 
   /**
+   * Enriches lead entity with service opportunity recommendation and B1-B4 intelligence fields.
+   */
+  private formatLeadWithDetails(lead: any): LeadWithDetails {
+    const serviceRecommendation = evaluateServiceOpportunity({
+      domain: lead.domain,
+      websiteAudit: lead.websiteAudit || undefined,
+      aiAnalysis: lead.aiAnalysis || undefined,
+      leadScore: lead.leadScore || undefined,
+    });
+
+    const payload = (lead.leadSource?.queryPayload || {}) as Record<string, any>;
+
+    return {
+      ...lead,
+      serviceRecommendation,
+      campaign: lead.campaign || undefined,
+      source: lead.leadSource?.provider || (payload.sourceProvider as string) || undefined,
+      dataQuality: payload.dataQuality || undefined,
+      additionalPhones: Array.isArray(payload.additionalPhones) ? payload.additionalPhones : undefined,
+      latitude: typeof payload.latitude === 'number' ? payload.latitude : undefined,
+      longitude: typeof payload.longitude === 'number' ? payload.longitude : undefined,
+      email: (payload.email as string) || lead.contacts?.[0]?.email || undefined,
+      additionalEmails: Array.isArray(payload.additionalEmails) ? payload.additionalEmails : undefined,
+      additionalWebsites: Array.isArray(payload.additionalWebsites) ? payload.additionalWebsites : undefined,
+      placeDetailsEnriched: typeof payload.placeDetailsEnriched === 'boolean' ? payload.placeDetailsEnriched : undefined,
+      mapsUrl: (payload.mapsUrl as string) || undefined,
+      mapsMatchStatus: (payload.mapsMatchStatus as string) || undefined,
+      placeId: (payload.placeId as string) || undefined,
+      rating: typeof payload.rating === 'number' ? payload.rating : undefined,
+      userRatingsTotal: typeof payload.userRatingsTotal === 'number' ? payload.userRatingsTotal : undefined,
+      metadata: payload.metadata || (Object.keys(payload).length > 0 ? payload : undefined),
+      actionability: payload.actionability || undefined,
+    };
+  }
+
+  /**
    * Retrieves paginated leads scoped strictly to the workspace.
    */
   async listLeads(
@@ -38,19 +74,7 @@ export class LeadService {
       limit: query.limit,
     });
 
-    const data: LeadWithDetails[] = result.data.map((lead) => {
-      const serviceRecommendation = evaluateServiceOpportunity({
-        domain: lead.domain,
-        websiteAudit: (lead as any).websiteAudit,
-        aiAnalysis: (lead as any).aiAnalysis || undefined,
-        leadScore: (lead as any).leadScore || undefined,
-      });
-
-      return {
-        ...lead,
-        serviceRecommendation,
-      };
-    });
+    const data: LeadWithDetails[] = result.data.map((lead) => this.formatLeadWithDetails(lead));
 
     return {
       ...result,
@@ -67,17 +91,7 @@ export class LeadService {
       throw new NotFoundError('Lead not found or access denied for this workspace');
     }
 
-    const serviceRecommendation = evaluateServiceOpportunity({
-      domain: lead.domain,
-      websiteAudit: lead.websiteAudit,
-      aiAnalysis: lead.aiAnalysis || undefined,
-      leadScore: lead.leadScore || undefined,
-    });
-
-    return {
-      ...lead,
-      serviceRecommendation,
-    };
+    return this.formatLeadWithDetails(lead);
   }
 
   /**
@@ -145,14 +159,7 @@ export class LeadService {
       // Non-blocking
     }
 
-    const serviceRecommendation = evaluateServiceOpportunity({
-      domain: lead.domain,
-    });
-
-    return {
-      ...lead,
-      serviceRecommendation,
-    };
+    return this.formatLeadWithDetails(lead);
   }
 
   /**
@@ -179,14 +186,7 @@ export class LeadService {
       // Non-blocking audit failure
     }
 
-    const serviceRecommendation = evaluateServiceOpportunity({
-      domain: updated.domain,
-    });
-
-    return {
-      ...updated,
-      serviceRecommendation,
-    };
+    return this.formatLeadWithDetails(updated);
   }
 
   /**

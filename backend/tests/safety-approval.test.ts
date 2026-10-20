@@ -367,7 +367,7 @@ async function runSafetyApprovalTests() {
     });
     assert.equal(cancelRes.statusCode, 200);
     const cancelBody = JSON.parse(cancelRes.payload);
-    assert.equal(cancelBody.draft.status, 'FAILED');
+    assert.equal(cancelBody.draft.status, 'CANCELLED');
 
     await app.close();
     console.log('✓ Fastify Human Approval and Safety HTTP routes passed');

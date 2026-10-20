@@ -7,6 +7,23 @@ export type LeadWithDetails = Lead & {
   websiteAudit?: WebsiteAudit | null;
   aiAnalysis?: AIAnalysis | null;
   serviceRecommendation?: ServiceRecommendation;
+  campaign?: { id: string; name: string } | null;
+  source?: string;
+  dataQuality?: string;
+  additionalPhones?: string[];
+  latitude?: number;
+  longitude?: number;
+  email?: string;
+  additionalEmails?: string[];
+  additionalWebsites?: string[];
+  placeDetailsEnriched?: boolean;
+  mapsUrl?: string;
+  mapsMatchStatus?: string;
+  placeId?: string;
+  rating?: number;
+  userRatingsTotal?: number;
+  metadata?: Record<string, unknown> | null;
+  actionability?: any;
 };
 
 export interface LeadFilterParams {

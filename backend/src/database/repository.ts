@@ -445,7 +445,7 @@ export class LeadRepository implements BaseRepository<Lead> {
   async findById(
     id: string,
     workspaceId: string
-  ): Promise<(Lead & { contacts: Contact[]; websiteAudit: WebsiteAudit | null; leadScore: LeadScore | null; aiAnalysis: AIAnalysis | null }) | null> {
+  ): Promise<(Lead & { contacts: Contact[]; websiteAudit: WebsiteAudit | null; leadScore: LeadScore | null; aiAnalysis: AIAnalysis | null; leadSource?: LeadSource | null; campaign?: { id: string; name: string } | null }) | null> {
     return this.prisma.lead.findFirst({
       where: { id, workspaceId },
       include: {
@@ -453,8 +453,10 @@ export class LeadRepository implements BaseRepository<Lead> {
         leadScore: true,
         websiteAudit: true,
         aiAnalysis: true,
+        leadSource: true,
+        campaign: { select: { id: true, name: true } },
       },
-    });
+    }) as any;
   }
 
   async findByMatchKey(
@@ -646,7 +648,7 @@ export class LeadRepository implements BaseRepository<Lead> {
   async findManyPaginated(
     workspaceId: string,
     filter?: { campaignId?: string; status?: LeadStatus; search?: string; page?: number; limit?: number }
-  ): Promise<PaginationResult<Lead & { contacts: Contact[]; leadScore?: LeadScore | null; websiteAudit?: WebsiteAudit | null; aiAnalysis?: AIAnalysis | null }>> {
+  ): Promise<PaginationResult<Lead & { contacts: Contact[]; leadScore?: LeadScore | null; websiteAudit?: WebsiteAudit | null; aiAnalysis?: AIAnalysis | null; leadSource?: LeadSource | null; campaign?: { id: string; name: string } | null }>> {
     const page = Math.max(1, filter?.page || 1);
     const limit = Math.min(100, Math.max(1, filter?.limit || 20));
     const skip = (page - 1) * limit;
@@ -675,6 +677,8 @@ export class LeadRepository implements BaseRepository<Lead> {
           leadScore: true,
           websiteAudit: true,
           aiAnalysis: true,
+          leadSource: true,
+          campaign: { select: { id: true, name: true } },
         },
         orderBy: { createdAt: 'desc' },
         skip,
@@ -683,7 +687,7 @@ export class LeadRepository implements BaseRepository<Lead> {
     ]);
 
     return {
-      data,
+      data: data as any,
       total,
       page,
       limit,
@@ -1385,7 +1389,7 @@ export class OutreachRepository {
       campaignId?: string;
       leadId?: string;
       contactId?: string;
-      status?: EmailMessageStatus;
+      status?: EmailMessageStatus | 'CANCELLED';
       search?: string;
       page?: number;
       limit?: number;
@@ -1404,7 +1408,7 @@ export class OutreachRepository {
       },
       ...(filter?.contactId ? { contactId: filter.contactId } : {}),
       ...(filter?.leadId ? { contact: { leadId: filter.leadId } } : {}),
-      ...(filter?.status ? { status: filter.status } : {}),
+      ...(filter?.status ? { status: filter.status as EmailMessageStatus } : {}),
       ...(filter?.search
         ? {
             OR: [
@@ -1633,7 +1637,7 @@ export class OutreachRepository {
       where: { id },
       data: {
         isApproved: false,
-        status: 'FAILED', // using FAILED/REJECTED or CANCELLED lifecycle mapping
+        status: 'CANCELLED' as EmailMessageStatus,
       },
       include: {
         emailCampaign: {

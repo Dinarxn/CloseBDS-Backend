@@ -21,6 +21,10 @@ export interface OutreachItem {
   contactId: string;
   contactName: string;
   recipientEmail: string;
+  toEmail?: string;
+  fromEmail?: string;
+  fromName?: string;
+  emailCampaignId?: string;
   channel: OutreachChannel;
   subject: string;
   bodyText: string;
@@ -32,6 +36,8 @@ export interface OutreachItem {
   sentAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  lead?: any;
+  contact?: any;
 }
 
 export interface SafetyCheckDecision {
