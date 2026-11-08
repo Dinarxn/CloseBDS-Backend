@@ -2,6 +2,10 @@ export type N8nScope =
   | 'voice:read'
   | 'voice:prepare'
   | 'voice:request'
+  | 'calls:read'
+  | 'calls:write'
+  | 'calls:dispatch'
+  | 'webhooks:deliver'
   | 'leads:read'
   | 'leads:trigger-ai'
   | 'outreach:read'
@@ -13,6 +17,10 @@ export const ALL_N8N_SCOPES: readonly N8nScope[] = [
   'voice:read',
   'voice:prepare',
   'voice:request',
+  'calls:read',
+  'calls:write',
+  'calls:dispatch',
+  'webhooks:deliver',
   'leads:read',
   'leads:trigger-ai',
   'outreach:read',

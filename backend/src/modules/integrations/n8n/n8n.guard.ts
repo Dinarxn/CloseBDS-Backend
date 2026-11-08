@@ -36,10 +36,24 @@ export function requireN8nAuth(requiredScope?: N8nScope) {
       throw new UnauthorizedError('Invalid, expired, or revoked n8n API key.');
     }
 
-    if (requiredScope && !integration.scopes.includes(requiredScope)) {
-      throw new ForbiddenError(
-        `n8n integration lacks the required scope '${requiredScope}'. Granted scopes: [${integration.scopes.join(', ')}]`
-      );
+    if (requiredScope) {
+      const scopeAliases: Record<string, string[]> = {
+        'voice:read': ['voice:read', 'calls:read'],
+        'calls:read': ['calls:read', 'voice:read'],
+        'voice:prepare': ['voice:prepare', 'calls:write'],
+        'calls:write': ['calls:write', 'voice:prepare'],
+        'voice:request': ['voice:request', 'calls:dispatch'],
+        'calls:dispatch': ['calls:dispatch', 'voice:request'],
+      };
+
+      const acceptableScopes = scopeAliases[requiredScope] || [requiredScope];
+      const hasPermission = acceptableScopes.some((s) => integration.scopes.includes(s));
+
+      if (!hasPermission) {
+        throw new ForbiddenError(
+          `n8n integration lacks the required scope '${requiredScope}'. Granted scopes: [${integration.scopes.join(', ')}]`
+        );
+      }
     }
 
     // Fire-and-forget last used update

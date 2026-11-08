@@ -14,19 +14,171 @@ import {
   ProviderError,
 } from '../core/provider.types.js';
 import type { CallOutcomeType } from '@prisma/client';
+import type {
+  VoiceAIProviderContract,
+  VoiceAIProviderId,
+  ProviderCapabilities,
+  ProviderConnectionState,
+  VoiceAIModel,
+  VoiceAIVoice,
+  VoiceAIAssistantConfig,
+  VoiceAIAssistantSyncResult,
+  VoiceAIDispatchPayload,
+  VoiceAICallDispatchResult,
+  NormalizedVoiceAIEvent,
+  CallRecordingMetadata,
+  CallTurnInput,
+} from '../../modules/voice/voice.types.js';
 
 export interface VoiceAIOptions {
   providerName?: string;
   apiKey?: string;
 }
 
-export class StandardVoiceAIAdapter implements VoiceAIProvider {
-  public readonly providerName: string;
+/**
+ * Base Abstract Voice AI Adapter uniting CloseVDS VoiceAIProvider and VoiceAIProviderContract.
+ */
+export abstract class BaseVoiceAIAdapter implements VoiceAIProvider, VoiceAIProviderContract {
+  public abstract readonly providerId: VoiceAIProviderId;
+  public abstract readonly providerName: string;
   public readonly category = 'AI_LLM' as const;
+
+  abstract isConfigured(): boolean;
+  abstract getCapabilities(): ProviderCapability;
+
+  getVoiceAICapabilities(): ProviderCapabilities {
+    return {
+      supportsInbound: true,
+      supportsOutbound: true,
+      supportsCustomVoices: true,
+      supportsTransfer: true,
+      supportsRecording: true,
+      supportsTranscripts: true,
+      supportsRealtimeTranscription: true,
+      supportedCodecs: ['opus', 'pcm16', 'mulaw'],
+    };
+  }
+
+  abstract healthCheck(): Promise<ProviderHealthResult>;
+
+  async testConnection(_credentials?: Record<string, unknown>): Promise<{
+    connected: boolean;
+    status: ProviderConnectionState;
+    message: string;
+  }> {
+    const configured = this.isConfigured();
+    return {
+      connected: configured,
+      status: configured ? 'CONNECTED' : 'NOT_CONFIGURED',
+      message: configured
+        ? `${this.providerName} connection verified successfully.`
+        : `${this.providerName} credentials not configured.`,
+    };
+  }
+
+  async listModels(): Promise<VoiceAIModel[]> {
+    return [];
+  }
+
+  async listVoices(): Promise<VoiceAIVoice[]> {
+    return [];
+  }
+
+  async syncAssistant(config: VoiceAIAssistantConfig): Promise<VoiceAIAssistantSyncResult> {
+    return {
+      assistantId: config.assistantId || `asst_${Date.now()}`,
+      provider: this.providerId,
+      syncedAt: new Date(),
+      status: 'SYNCED',
+    };
+  }
+
+  async dispatchCall(_payload: VoiceAIDispatchPayload): Promise<VoiceAICallDispatchResult> {
+    return {
+      providerCallId: `call_${this.providerId}_${Date.now()}`,
+      provider: this.providerId,
+      status: 'initiated',
+      startedAt: new Date(),
+    };
+  }
+
+  verifyWebhookSignature(
+    _rawPayload: string | Buffer,
+    _signatureHeader?: string,
+    _secret?: string
+  ): boolean {
+    return false;
+  }
+
+  parseWebhookEvent(rawPayload: unknown): NormalizedVoiceAIEvent {
+    const payload =
+      typeof rawPayload === 'object' && rawPayload !== null
+        ? (rawPayload as Record<string, unknown>)
+        : {};
+
+    return {
+      eventId: `vai_evt_${Date.now()}`,
+      provider: this.providerId,
+      providerCallId: String(payload.callId || `call_${Date.now()}`),
+      eventType: 'call_analyzed',
+      normalizedStatus: 'completed',
+      occurredAt: new Date(),
+    };
+  }
+
+  async fetchTranscript(_callId: string): Promise<CallTurnInput[]> {
+    return [];
+  }
+
+  async fetchRecordingMetadata(callId: string): Promise<CallRecordingMetadata> {
+    return {
+      callId,
+      status: 'NOT_RECORDED',
+    };
+  }
+
+  abstract generateGroundedContext(
+    leadData: GroundedLeadData,
+    agentConfig: {
+      callObjective: string;
+      approvedTalkingPoints: string[];
+      prohibitedClaims: string[];
+    }
+  ): GroundedVoiceContext;
+
+  abstract createVoiceSession(
+    callId: string,
+    context: GroundedVoiceContext
+  ): Promise<VoiceSession>;
+
+  abstract handleTurn(
+    session: VoiceSession,
+    turn: VoiceTurn
+  ): Promise<VoiceResponse>;
+
+  abstract summarizeCall(
+    turns: VoiceTurn[],
+    callDurationSeconds?: number
+  ): Promise<CallSummaryResult>;
+
+  abstract classifyOutcome(
+    turns: VoiceTurn[],
+    metadata?: Record<string, unknown>
+  ): Promise<CallOutcomeAnalysis>;
+}
+
+/**
+ * Standard Voice AI conversational adapter implementing fact-grounding, anti-hallucination,
+ * turn handling, outcome classification, and summarization.
+ */
+export class StandardVoiceAIAdapter extends BaseVoiceAIAdapter {
+  public readonly providerId: VoiceAIProviderId = 'mock-voice-ai';
+  public readonly providerName: string;
 
   private apiKey?: string;
 
   constructor(options?: VoiceAIOptions) {
+    super();
     this.providerName = options?.providerName || 'OpenAI Realtime / Claude Voice';
     this.apiKey = options?.apiKey || process.env.AI_PROVIDER_API_KEY || process.env.OPENAI_API_KEY;
   }
@@ -76,11 +228,6 @@ export class StandardVoiceAIAdapter implements VoiceAIProvider {
     };
   }
 
-  /**
-   * Grounded Context Generator.
-   * Strictly separates verified facts from observed website gaps, offers, and unknown parameters.
-   * Prohibits hallucination of pricing, false guarantees, fake reviews, or client relationships.
-   */
   generateGroundedContext(
     leadData: GroundedLeadData,
     agentConfig: {

@@ -61,3 +61,53 @@ export function assertValidCallTransition(current: CallStatus, next: CallStatus)
     );
   }
 }
+
+// ==============================================================================
+// VOICE AGENT STUDIO LIFECYCLE STATE MACHINE (R4)
+// Transitions: DRAFT -> INCOMPLETE -> READY_FOR_TEST -> TESTED -> ACTIVE -> PAUSED / ERROR
+// ==============================================================================
+
+import type { VoiceAgentLifecycleStatus } from './voice.types.js';
+
+export const ALLOWED_AGENT_LIFECYCLE_TRANSITIONS: Record<
+  VoiceAgentLifecycleStatus,
+  readonly VoiceAgentLifecycleStatus[]
+> = {
+  DRAFT: ['INCOMPLETE', 'READY_FOR_TEST', 'ERROR'],
+  INCOMPLETE: ['DRAFT', 'READY_FOR_TEST', 'ERROR'],
+  READY_FOR_TEST: ['INCOMPLETE', 'TESTED', 'ERROR'],
+  TESTED: ['READY_FOR_TEST', 'ACTIVE', 'INCOMPLETE', 'PAUSED', 'ERROR'],
+  ACTIVE: ['PAUSED', 'TESTED', 'INCOMPLETE', 'ERROR'],
+  PAUSED: ['ACTIVE', 'TESTED', 'INCOMPLETE', 'ERROR'],
+  ERROR: ['DRAFT', 'INCOMPLETE', 'READY_FOR_TEST', 'PAUSED'],
+} as const;
+
+export function isValidAgentLifecycleTransition(
+  current: VoiceAgentLifecycleStatus,
+  next: VoiceAgentLifecycleStatus
+): boolean {
+  // Idempotent self-transition
+  if (current === next) {
+    return true;
+  }
+
+  const allowed = ALLOWED_AGENT_LIFECYCLE_TRANSITIONS[current];
+  if (!allowed) {
+    return false;
+  }
+
+  return allowed.includes(next);
+}
+
+export function assertValidAgentLifecycleTransition(
+  current: VoiceAgentLifecycleStatus,
+  next: VoiceAgentLifecycleStatus
+): void {
+  if (!isValidAgentLifecycleTransition(current, next)) {
+    throw new BadRequestError(
+      `Invalid voice agent lifecycle transition from '${current}' to '${next}'. Allowed next states: [${(
+        ALLOWED_AGENT_LIFECYCLE_TRANSITIONS[current] || []
+      ).join(', ')}]`
+    );
+  }
+}

@@ -51,7 +51,7 @@ async function runTwilioVoiceTests() {
 
   const testAuthToken = 'sample_twilio_secret_token_12345';
   const configuredAdapter = new TwilioVoiceAdapter({
-    accountSid: 'AC11111111111111111111111111111111',
+    accountSid: 'AC_mock_twilio_account_sid_valid_1111',
     authToken: testAuthToken,
     phoneNumber: '+15005550006',
   });

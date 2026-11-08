@@ -23,6 +23,7 @@ import { followUpService } from '../follow-ups/follow-up.service.js';
 import { callingPolicyService } from './calling-policy.service.js';
 import type {
   Call,
+  CallStatus,
   VoiceCampaign,
   VoiceAgentConfig,
   WorkspaceCallingPolicy,
@@ -36,11 +37,13 @@ import type {
   CallDispatchResult,
   CallTurnInput,
   VoiceSafetyCheckResult,
+  CallTimelineMilestone,
 } from './voice.types.js';
 
 export class VoiceService {
   private voiceAI = new StandardVoiceAIAdapter();
   private twilioAdapter = new TwilioVoiceAdapter();
+  private inFlightDispatches = new Set<string>();
 
   // --- Calling Policy ---
   async getCallingPolicy(workspaceId: string): Promise<WorkspaceCallingPolicy> {
@@ -245,6 +248,24 @@ export class VoiceService {
       normalizedPhone,
       groundedContext: grounded as unknown as Record<string, unknown>,
       requiresApproval: true,
+      lead: {
+        id: lead.id,
+        businessName: lead.businessName,
+        domain: lead.domain,
+      },
+      contact: {
+        id: contact.id,
+        fullName: contact.fullName,
+        title: contact.title,
+        phone: contact.phone,
+      },
+      agentConfig: agentConfig
+        ? {
+            id: agentConfig.id,
+            name: agentConfig.name,
+            callObjective: agentConfig.callObjective,
+          }
+        : null,
     };
   }
 
@@ -271,6 +292,21 @@ export class VoiceService {
 
     const callingPolicy = await callingPolicyService.getOrCreatePolicy(workspaceId);
 
+    // Prevent duplicate active calls to the same lead
+    const prisma = databaseClient.getPrismaClient();
+    const existingActive = await prisma.call.findFirst({
+      where: {
+        workspaceId,
+        leadId: input.leadId,
+        status: { in: ['QUEUED', 'APPROVAL_REQUIRED', 'APPROVED', 'INITIATING', 'RINGING', 'IN_PROGRESS'] },
+      },
+    });
+    if (existingActive) {
+      throw new BadRequestError(
+        `An active call session already exists for this lead (Call ID: ${existingActive.id}, Status: ${existingActive.status}). Duplicate call creation is prevented.`
+      );
+    }
+
     let campaign: Campaign | null = null;
     let voiceCampaign: VoiceCampaign | null = null;
     if (input.campaignId) {
@@ -285,7 +321,6 @@ export class VoiceService {
       throw new NotFoundError('Lead not found in this workspace');
     }
 
-    const prisma = databaseClient.getPrismaClient();
     const contact = await prisma.contact.findFirst({
       where: { id: input.contactId, leadId: lead.id },
     });
@@ -490,10 +525,10 @@ export class VoiceService {
       );
     }
 
-    // Enforce Global Kill Switch immediately prior to dispatch
-    const isKillSwitchActive =
-      process.env.KILL_SWITCH_ACTIVE === 'true' || process.env.KILL_SWITCH_ACTIVE === '1';
-    if (isKillSwitchActive) {
+    // Enforce Global & Workspace Kill Switch immediately prior to dispatch
+    const isGlobalKillSwitchActive = callingPolicyService.isGlobalKillSwitchActive();
+    const isWorkspaceKillSwitchActive = !callingPolicy.isActive;
+    if (isGlobalKillSwitchActive) {
       await auditRepository.create({
         workspaceId,
         userId: call.approvedByUserId || undefined,
@@ -504,155 +539,184 @@ export class VoiceService {
       }).catch(() => {});
       throw new KillSwitchActiveError('Global Outreach Kill Switch is active. Telephony dispatch blocked.');
     }
-
-    assertValidCallTransition(call.status, 'INITIATING');
-
-    // Run Pre-Dispatch Safety Check (All 18 Gates)
-    const safetyCheck = await voiceSafetyEvaluator.evaluate({
-      workspaceId,
-      campaignId: call.campaignId,
-      leadId: call.leadId,
-      contactId: call.contactId,
-      recipientPhone: call.recipientPhone,
-      normalizedPhone: call.normalizedPhone,
-      callingPolicy,
-      voiceCampaign: call.voiceCampaign,
-      campaign: call.campaign,
-      lead: call.lead,
-      contact: call.contact,
-      agentConfig: call.agentConfig,
-      currentCall: call,
-    });
-
-    if (!safetyCheck.passed) {
-      await voiceRepository.updateCallStatus(id, workspaceId, 'BLOCKED', {
-        blockedReason: safetyCheck.blockedReason,
-      });
-
-      await voiceRepository.createEvent(id, 'CALL_FAILED', {
-        blockedReason: safetyCheck.blockedReason,
-      });
-
+    if (isWorkspaceKillSwitchActive) {
       await auditRepository.create({
         workspaceId,
         userId: call.approvedByUserId || undefined,
         eventType: 'CALL_BLOCKED',
         entityType: 'Call',
         entityId: id,
-        metadata: { blockedReason: safetyCheck.blockedReason },
+        metadata: { reason: 'Workspace Emergency Kill Switch is active' },
       }).catch(() => {});
-
-      return {
-        callId: id,
-        status: 'BLOCKED',
-        blockedReason: safetyCheck.blockedReason,
-      };
+      throw new KillSwitchActiveError(`Emergency Kill Switch is active for workspace ${workspaceId}. Telephony dispatch blocked.`);
     }
 
-    // Provider Dispatch Boundary
-    const telephonyAdapter =
-      providerRegistry.getAdapter<VoiceProviderAdapter>('Twilio') || this.twilioAdapter;
-
-    if (!telephonyAdapter.isConfigured()) {
+    // Concurrency lock to prevent duplicate dial-out to the same recipient handset simultaneously
+    const dispatchLockKey = `${workspaceId}:${call.normalizedPhone}`;
+    if (this.inFlightDispatches.has(dispatchLockKey)) {
       throw new BadRequestError(
-        'Outbound telephony provider is not configured. Outbound voice calling is disabled for safety.'
+        `A call dispatch is already in-flight for phone number ${call.normalizedPhone}. Concurrency lock active.`
       );
     }
-
-    const attemptNumber = (call.attempts?.length || 0) + 1;
-    const attempt = await voiceRepository.createAttempt(call.id, {
-      attemptNumber,
-      status: 'INITIATING',
-    });
+    this.inFlightDispatches.add(dispatchLockKey);
 
     try {
-      const recordingConsent = call.voiceCampaign?.recordingConsent ?? callingPolicy.recordingConsent;
-      const providerResult = await telephonyAdapter.initiateCall({
-        callId: call.id,
+      assertValidCallTransition(call.status, 'INITIATING');
+
+      // Run Pre-Dispatch Safety Check (All 18 Gates)
+      const safetyCheck = await voiceSafetyEvaluator.evaluate({
+        workspaceId,
+        campaignId: call.campaignId,
         leadId: call.leadId,
         contactId: call.contactId,
-        recipientPhone: call.normalizedPhone,
-        streamUrl: options?.streamUrl,
-        recordingConsent,
+        recipientPhone: call.recipientPhone,
+        normalizedPhone: call.normalizedPhone,
+        callingPolicy,
+        voiceCampaign: call.voiceCampaign,
+        campaign: call.campaign,
+        lead: call.lead,
+        contact: call.contact,
+        agentConfig: call.agentConfig,
+        currentCall: call,
       });
 
-      const providerCallId =
-        'providerCallId' in providerResult ? providerResult.providerCallId : providerResult.callSessionId;
+      if (!safetyCheck.passed) {
+        await voiceRepository.updateCallStatus(id, workspaceId, 'BLOCKED', {
+          blockedReason: safetyCheck.blockedReason,
+        });
 
-      await voiceRepository.updateCallStatus(id, workspaceId, 'INITIATING', {
-        providerCallId,
-        initiatedAt: new Date(),
-      });
+        await voiceRepository.createEvent(id, 'CALL_FAILED', {
+          blockedReason: safetyCheck.blockedReason,
+        });
 
-      await voiceRepository.updateAttempt(attempt.id, {
-        providerCallId,
-        status: 'INITIATING',
-      });
-
-      await voiceRepository.createEvent(id, 'CALL_INITIATED', {
-        providerCallId,
-        attemptNumber,
-      });
-
-      await auditRepository.create({
-        workspaceId,
-        userId: call.approvedByUserId || undefined,
-        eventType: 'CALL_DISPATCHED',
-        entityType: 'Call',
-        entityId: id,
-        metadata: {
-          providerCallId,
-          attemptNumber,
-          recipientPhone: call.normalizedPhone,
-        },
-      }).catch(() => {});
-
-      return {
-        callId: id,
-        status: 'INITIATING',
-        providerCallId,
-        startedAt: new Date(),
-      };
-    } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Telephony dispatch failed';
-
-      await voiceRepository.updateCallStatus(id, workspaceId, 'FAILED', {
-        blockedReason: errorMsg,
-      });
-
-      await voiceRepository.updateAttempt(attempt.id, {
-        status: 'FAILED',
-        failureReason: errorMsg,
-        endedAt: new Date(),
-      });
-
-      await voiceRepository.createEvent(id, 'CALL_FAILED', {
-        attemptNumber,
-        error: errorMsg,
-      });
-
-      await auditRepository.create({
-        workspaceId,
-        userId: call.approvedByUserId || undefined,
-        eventType: 'CALL_DISPATCH_FAILED',
-        entityType: 'Call',
-        entityId: id,
-        metadata: { error: errorMsg, attemptNumber },
-      }).catch(() => {});
-
-      // Outbound n8n notification
-      try {
-        const { n8nService } = await import('../integrations/n8n/n8n.service.js');
-        n8nService.dispatchOutboundWebhook(workspaceId, 'call.failed', {
-          callId: id,
-          leadId: call.leadId,
-          error: errorMsg,
+        await auditRepository.create({
+          workspaceId,
+          userId: call.approvedByUserId || undefined,
+          eventType: 'CALL_BLOCKED',
+          entityType: 'Call',
+          entityId: id,
+          metadata: { blockedReason: safetyCheck.blockedReason },
         }).catch(() => {});
-      } catch {
-        // Non-blocking
+
+        return {
+          callId: id,
+          status: 'BLOCKED',
+          blockedReason: safetyCheck.blockedReason,
+        };
       }
 
-      throw err;
+      // Provider Dispatch Boundary
+      const telephonyAdapter =
+        providerRegistry.getAdapter<VoiceProviderAdapter>('Twilio') || this.twilioAdapter;
+
+      if (!telephonyAdapter.isConfigured()) {
+        throw new BadRequestError(
+          'Outbound telephony provider is not configured. Outbound voice calling is disabled for safety.'
+        );
+      }
+
+      const attemptNumber = (call.attempts?.length || 0) + 1;
+      const attempt = await voiceRepository.createAttempt(call.id, {
+        attemptNumber,
+        status: 'INITIATING',
+      });
+
+      const idempotencyToken = `disp_${crypto.randomUUID()}`;
+
+      try {
+        const recordingConsent = call.voiceCampaign?.recordingConsent ?? callingPolicy.recordingConsent;
+        const providerResult = await telephonyAdapter.initiateCall({
+          callId: call.id,
+          leadId: call.leadId,
+          contactId: call.contactId,
+          recipientPhone: call.normalizedPhone,
+          streamUrl: options?.streamUrl,
+          recordingConsent,
+        });
+
+        const providerCallId =
+          'providerCallId' in providerResult ? providerResult.providerCallId : providerResult.callSessionId;
+
+        await voiceRepository.updateCallStatus(id, workspaceId, 'INITIATING', {
+          providerCallId,
+          initiatedAt: new Date(),
+        });
+
+        await voiceRepository.updateAttempt(attempt.id, {
+          providerCallId,
+          status: 'INITIATING',
+        });
+
+        await voiceRepository.createEvent(id, 'CALL_INITIATED', {
+          providerCallId,
+          attemptNumber,
+          idempotencyToken,
+        });
+
+        await auditRepository.create({
+          workspaceId,
+          userId: call.approvedByUserId || undefined,
+          eventType: 'CALL_DISPATCHED',
+          entityType: 'Call',
+          entityId: id,
+          metadata: {
+            providerCallId,
+            attemptNumber,
+            recipientPhone: call.normalizedPhone,
+            idempotencyToken,
+          },
+        }).catch(() => {});
+
+        return {
+          callId: id,
+          status: 'INITIATING',
+          providerCallId,
+          startedAt: new Date(),
+          idempotencyToken,
+        };
+      } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : 'Telephony dispatch failed';
+
+        await voiceRepository.updateCallStatus(id, workspaceId, 'FAILED', {
+          blockedReason: errorMsg,
+        });
+
+        await voiceRepository.updateAttempt(attempt.id, {
+          status: 'FAILED',
+          failureReason: errorMsg,
+          endedAt: new Date(),
+        });
+
+        await voiceRepository.createEvent(id, 'CALL_FAILED', {
+          attemptNumber,
+          error: errorMsg,
+        });
+
+        await auditRepository.create({
+          workspaceId,
+          userId: call.approvedByUserId || undefined,
+          eventType: 'CALL_DISPATCH_FAILED',
+          entityType: 'Call',
+          entityId: id,
+          metadata: { error: errorMsg, attemptNumber },
+        }).catch(() => {});
+
+        // Outbound n8n notification
+        try {
+          const { n8nService } = await import('../integrations/n8n/n8n.service.js');
+          n8nService.dispatchOutboundWebhook(workspaceId, 'call.failed', {
+            callId: id,
+            leadId: call.leadId,
+            error: errorMsg,
+          }).catch(() => {});
+        } catch {
+          // Non-blocking
+        }
+
+        throw err;
+      }
+    } finally {
+      this.inFlightDispatches.delete(dispatchLockKey);
     }
   }
 
@@ -848,6 +912,140 @@ export class VoiceService {
     }
 
     return callOutcome;
+  }
+
+  /**
+   * Retrieves an enriched, chronological call milestone timeline.
+   * Tracks progression: Prepared → Approved → Queued → Initiated → Ringing → Connected → Transcribing → Ended
+   */
+  async getCallTimeline(id: string, workspaceId: string): Promise<{
+    callId: string;
+    currentStatus: CallStatus;
+    milestones: CallTimelineMilestone[];
+    events: CallEvent[];
+  }> {
+    const call = await this.getCall(id, workspaceId);
+    const events = (call.events || []).sort(
+      (a, b) => new Date(a.occurredAt).getTime() - new Date(b.occurredAt).getTime()
+    );
+
+    const eventTypes = new Set(events.map((e) => e.eventType));
+
+    const isCreated = true;
+    const isApproved = call.isApproved || eventTypes.has('CALL_STARTED');
+    const isQueued =
+      ['QUEUED', 'INITIATING', 'RINGING', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'BUSY', 'NO_ANSWER', 'CANCELLED', 'OPTED_OUT'].includes(call.status) ||
+      eventTypes.has('CALL_INITIATED');
+    const isInitiated = Boolean(call.initiatedAt) || eventTypes.has('CALL_INITIATED');
+    const isRinging =
+      eventTypes.has('CALL_RINGING') || ['RINGING', 'IN_PROGRESS', 'COMPLETED'].includes(call.status);
+    const isConnected =
+      eventTypes.has('CALL_MEDIA_CONNECTED') ||
+      eventTypes.has('CALL_ANSWERED') ||
+      ['IN_PROGRESS', 'COMPLETED'].includes(call.status);
+    const isTranscribing = (call.transcripts && call.transcripts.length > 0) || isConnected;
+    const isEnded = isTerminalCallStatus(call.status);
+
+    const findEventTime = (types: string[]) => {
+      const match = events.find((e) => types.includes(e.eventType));
+      return match ? match.occurredAt : undefined;
+    };
+
+    const milestones: CallTimelineMilestone[] = [
+      {
+        step: 'PREPARED',
+        label: 'Call Prepared & Grounded',
+        status: isCreated ? 'COMPLETED' : 'PENDING',
+        timestamp: call.createdAt,
+        description: `Pre-flight safety validated against compliance gates for ${call.normalizedPhone}`,
+      },
+      {
+        step: 'APPROVED',
+        label: 'Human Approval Gate',
+        status: isApproved ? 'COMPLETED' : call.status === 'BLOCKED' ? 'FAILED' : 'ACTIVE',
+        timestamp: call.approvedAt || findEventTime(['CALL_STARTED']) || undefined,
+        description: call.isApproved
+          ? `Signed off by operator (${call.approvedByUserId || 'human'})`
+          : 'Awaiting required operator sign-off before dispatch',
+      },
+      {
+        step: 'QUEUED',
+        label: 'Dispatched to Queue',
+        status: isInitiated ? 'COMPLETED' : isQueued ? 'ACTIVE' : 'PENDING',
+        timestamp: call.scheduledAt || call.approvedAt || undefined,
+        description: 'Placed in telephony dispatch queue with idempotency token',
+      },
+      {
+        step: 'INITIATING',
+        label: 'Telephony Carrier Handshake',
+        status: isRinging
+          ? 'COMPLETED'
+          : isInitiated
+          ? 'ACTIVE'
+          : call.status === 'FAILED'
+          ? 'FAILED'
+          : 'PENDING',
+        timestamp: call.initiatedAt || findEventTime(['CALL_INITIATED']) || undefined,
+        description: call.providerCallId
+          ? `Carrier session initiated (SID: ${call.providerCallId})`
+          : 'Initializing telephony carrier handshake',
+      },
+      {
+        step: 'RINGING',
+        label: 'Handset Ringing',
+        status: isConnected
+          ? 'COMPLETED'
+          : call.status === 'RINGING'
+          ? 'ACTIVE'
+          : ['BUSY', 'NO_ANSWER'].includes(call.status)
+          ? 'FAILED'
+          : isRinging
+          ? 'COMPLETED'
+          : 'PENDING',
+        timestamp: findEventTime(['CALL_RINGING']),
+        description: ['BUSY', 'NO_ANSWER'].includes(call.status)
+          ? `Ring cycle ended: ${call.status}`
+          : 'Ringing prospect recipient handset',
+      },
+      {
+        step: 'CONNECTED',
+        label: 'Audio Stream Connected',
+        status: isEnded
+          ? 'COMPLETED'
+          : call.status === 'IN_PROGRESS'
+          ? 'ACTIVE'
+          : isConnected
+          ? 'COMPLETED'
+          : 'PENDING',
+        timestamp: findEventTime(['CALL_MEDIA_CONNECTED', 'CALL_ANSWERED']),
+        description:
+          'Bi-directional audio media stream active between prospect and voice AI agent',
+      },
+      {
+        step: 'TRANSCRIBING',
+        label: 'Real-Time Transcription',
+        status: isEnded ? 'COMPLETED' : isTranscribing ? 'ACTIVE' : 'PENDING',
+        durationSeconds: call.durationSeconds || undefined,
+        description: `${call.transcripts?.length || 0} conversation speech turns recorded and analyzed`,
+      },
+      {
+        step: 'ENDED',
+        label: 'Call Lifecycle Completed',
+        status: isEnded ? (call.status === 'COMPLETED' ? 'COMPLETED' : 'FAILED') : 'PENDING',
+        timestamp: call.completedAt || undefined,
+        durationSeconds: call.durationSeconds || undefined,
+        description: isEnded
+          ? `Call ended with status: ${call.status}`
+          : 'Call session active or pending',
+      },
+    ];
+
+    return {
+      callId: call.id,
+      currentStatus: call.status,
+      milestones,
+      events,
+    };
   }
 }
 

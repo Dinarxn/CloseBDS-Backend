@@ -116,3 +116,55 @@ export interface VoiceAIProvider extends BaseProviderAdapter {
     metadata?: Record<string, unknown>
   ): Promise<CallOutcomeAnalysis>;
 }
+
+export * from './voice-ai.adapter.js';
+export * from './mock-voice-ai.adapter.js';
+export * from './mock-fixtures.js';
+export * from './retell.adapter.js';
+export * from './vapi.adapter.js';
+
+import { BaseVoiceAIAdapter } from './voice-ai.adapter.js';
+import { RetellVoiceAIAdapter } from './retell.adapter.js';
+import { VapiVoiceAIAdapter } from './vapi.adapter.js';
+import { MockVoiceAIAdapter } from './mock-voice-ai.adapter.js';
+import type { VoiceAIProviderId } from '../../modules/voice/voice.types.js';
+
+/**
+ * Multi-Provider Voice AI Registry.
+ * Holds decoupled adapters for Retell AI, Vapi, and Mock Voice AI.
+ */
+export class VoiceAIRegistry {
+  private adapters = new Map<VoiceAIProviderId, BaseVoiceAIAdapter>();
+
+  constructor() {
+    this.adapters.set('retell', new RetellVoiceAIAdapter());
+    this.adapters.set('vapi', new VapiVoiceAIAdapter());
+    this.adapters.set('mock-voice-ai', new MockVoiceAIAdapter());
+  }
+
+  registerAdapter(id: VoiceAIProviderId, adapter: BaseVoiceAIAdapter): void {
+    this.adapters.set(id, adapter);
+  }
+
+  getAdapter(id: VoiceAIProviderId): BaseVoiceAIAdapter | undefined {
+    return this.adapters.get(id);
+  }
+
+  hasAdapter(id: VoiceAIProviderId): boolean {
+    return this.adapters.has(id);
+  }
+
+  listAdapters(): BaseVoiceAIAdapter[] {
+    return Array.from(this.adapters.values());
+  }
+}
+
+export const voiceAIRegistry = new VoiceAIRegistry();
+
+export function getVoiceAIAdapter(providerId: VoiceAIProviderId): BaseVoiceAIAdapter {
+  const adapter = voiceAIRegistry.getAdapter(providerId);
+  if (!adapter) {
+    throw new Error(`Voice AI Provider adapter '${providerId}' not found in registry`);
+  }
+  return adapter;
+}

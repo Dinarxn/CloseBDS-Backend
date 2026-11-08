@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import { n8nIntegrationRepository } from '../../../database/repository.js';
 import type { N8nKeyCreationResult, N8nIntegrationRecord } from './n8n.types.js';
-import { BadRequestError } from '../../../core/errors/api-error.js';
+import { BadRequestError, NotFoundError } from '../../../core/errors/api-error.js';
+import type { N8nWebhookDelivery } from '@prisma/client';
 
 export class N8nService {
   /**
@@ -138,6 +139,53 @@ export class N8nService {
           lastError: err instanceof Error ? err.message : 'Network failure',
         });
       }
+    }
+  }
+
+  /**
+   * Retries an outbound webhook delivery.
+   */
+  async retryDelivery(deliveryId: string, workspaceId: string): Promise<N8nWebhookDelivery> {
+    const delivery = await n8nIntegrationRepository.findDeliveryById(deliveryId, workspaceId);
+    if (!delivery) {
+      throw new NotFoundError(`Webhook delivery '${deliveryId}' not found`);
+    }
+
+    const integrations = await n8nIntegrationRepository.findMany(workspaceId);
+    const target = integrations.find((i) => i.id === delivery.integrationId && i.isActive && i.webhookUrl);
+    if (!target || !target.webhookUrl) {
+      throw new BadRequestError('Integration does not have a configured active webhook URL');
+    }
+
+    const secret = process.env.N8N_WEBHOOK_SECRET || process.env.JWT_SECRET || 'closevds_webhook_secret_key';
+    const payloadString = JSON.stringify(delivery.payload);
+    const signature = crypto.createHmac('sha256', secret).update(payloadString).digest('hex');
+
+    try {
+      const res = await fetch(target.webhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CloseVDS-Signature': `sha256=${signature}`,
+          'X-CloseVDS-Event': delivery.eventType,
+        },
+        body: payloadString,
+        signal: AbortSignal.timeout(10000),
+      });
+
+      return await n8nIntegrationRepository.updateDelivery(delivery.id, {
+        attempts: { increment: 1 },
+        statusCode: res.status,
+        status: res.ok ? 'DELIVERED' : 'FAILED',
+        deliveredAt: res.ok ? new Date() : undefined,
+        lastError: res.ok ? null : `HTTP status ${res.status}`,
+      });
+    } catch (err: unknown) {
+      return await n8nIntegrationRepository.updateDelivery(delivery.id, {
+        attempts: { increment: 1 },
+        status: 'FAILED',
+        lastError: err instanceof Error ? err.message : 'Network retry failure',
+      });
     }
   }
 }

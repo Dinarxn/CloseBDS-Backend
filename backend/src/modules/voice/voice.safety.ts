@@ -3,6 +3,43 @@ import type { VoiceSafetyContext, VoiceSafetyCheckResult } from './voice.types.j
 import { suppressionRepository, voiceRepository } from '../../database/repository.js';
 import { providerRegistry } from '../../integrations/core/provider.registry.js';
 import type { VoiceProviderAdapter } from '../../integrations/calling/index.js';
+import { callingPolicyService } from './calling-policy.service.js';
+
+/**
+ * Resolves appropriate IANA timezone from phone prefix/area code.
+ */
+export function resolveTimezoneFromPhone(phone: string): string {
+  if (!phone || !phone.startsWith('+')) return 'America/New_York';
+
+  if (phone.startsWith('+1') && phone.length >= 5) {
+    const areaCode = phone.slice(2, 5);
+    // US Eastern
+    if (['201', '202', '203', '212', '215', '216', '305', '315', '330', '404', '412', '470', '475', '508', '516', '518', '585', '609', '610', '617', '646', '703', '704', '716', '718', '732', '757', '786', '804', '813', '845', '856', '914', '917', '919', '929', '954'].includes(areaCode)) {
+      return 'America/New_York';
+    }
+    // US Central
+    if (['210', '214', '217', '219', '224', '281', '312', '314', '319', '331', '361', '405', '414', '469', '504', '512', '612', '630', '636', '682', '708', '712', '713', '715', '773', '815', '816', '830', '832', '903', '913', '918', '940', '956', '972', '979'].includes(areaCode)) {
+      return 'America/Chicago';
+    }
+    // US Mountain
+    if (['303', '307', '385', '406', '435', '480', '505', '520', '602', '623', '719', '720', '801', '928', '970'].includes(areaCode)) {
+      return 'America/Denver';
+    }
+    // US Pacific
+    if (['206', '209', '213', '253', '310', '323', '360', '408', '415', '425', '442', '503', '509', '510', '530', '541', '559', '562', '619', '626', '628', '650', '661', '707', '714', '747', '760', '805', '818', '831', '858', '909', '916', '925', '949', '951', '971'].includes(areaCode)) {
+      return 'America/Los_Angeles';
+    }
+    return 'America/New_York';
+  }
+
+  if (phone.startsWith('+44')) return 'Europe/London';
+  if (phone.startsWith('+33')) return 'Europe/Paris';
+  if (phone.startsWith('+49')) return 'Europe/Berlin';
+  if (phone.startsWith('+61')) return 'Australia/Sydney';
+  if (phone.startsWith('+81')) return 'Asia/Tokyo';
+
+  return 'UTC';
+}
 
 /**
  * Strict E.164 phone number normalizer.
@@ -109,17 +146,31 @@ export class VoiceSafetyEvaluator {
     }
     addGate(4, 'Recipient Phone E.164 Validation Gate', validFormat, 'Phone number failed strict E.164 validation');
 
-    // Gate 5: Workspace Calling Policy Active Gate / Campaign Active Status Gate
-    const policyActive = callingPolicy.isActive && (!ctx.campaign || ctx.campaign.status === 'ACTIVE');
-    const gate5Name =
-      ctx.campaign && ctx.campaign.status !== 'ACTIVE'
-        ? 'Campaign Active Status Gate'
-        : 'Workspace Calling Policy Gate';
-    const policyReason = !callingPolicy.isActive
-      ? 'Workspace calling policy is deactivated'
-      : ctx.campaign && ctx.campaign.status !== 'ACTIVE'
-      ? `Campaign status is '${ctx.campaign.status}', must be 'ACTIVE'`
-      : undefined;
+    // Gate 5: Workspace Calling Policy Active Gate / Emergency Kill Switch Gate / Campaign Status Gate
+    const isGlobalKill = callingPolicyService.isGlobalKillSwitchActive();
+    const isWorkspaceKill = !callingPolicy.isActive;
+    const isCampaignInactive = Boolean(ctx.campaign && ctx.campaign.status !== 'ACTIVE');
+
+    let policyActive = true;
+    let policyReason: string | undefined;
+
+    if (isGlobalKill) {
+      policyActive = false;
+      policyReason = 'Global Emergency Kill Switch is active. All voice outreach is suspended.';
+    } else if (isWorkspaceKill) {
+      policyActive = false;
+      policyReason = `Emergency Kill Switch is active for workspace ${ctx.workspaceId}. Calling is halted.`;
+    } else if (isCampaignInactive) {
+      policyActive = false;
+      policyReason = `Campaign status is '${ctx.campaign!.status}', must be 'ACTIVE'`;
+    }
+
+    const gate5Name = isCampaignInactive
+      ? 'Campaign Active Status Gate'
+      : isGlobalKill || isWorkspaceKill
+      ? 'Emergency Kill Switch Gate'
+      : 'Workspace Calling Policy Gate';
+
     addGate(5, gate5Name, policyActive, policyReason);
 
     // Gate 6: Daily Workspace Call Limit Gate
@@ -137,6 +188,7 @@ export class VoiceSafetyEvaluator {
     // Gate 8: Retry Delay Gate
     const retryDelay = ctx.voiceCampaign?.retryDelayMinutes ?? callingPolicy.retryDelayMinutes ?? 120;
     let delayRespected = true;
+    let cooldownReason: string | undefined;
     if (ctx.currentCall) {
       const lastAttempt = ctx.currentCall.attempts?.[ctx.currentCall.attempts.length - 1];
       if (lastAttempt && lastAttempt.endedAt) {
@@ -144,25 +196,33 @@ export class VoiceSafetyEvaluator {
         const diffMinutes = diffMs / (1000 * 60);
         if (diffMinutes < retryDelay) {
           delayRespected = false;
+          const remainingMinutes = Math.max(1, Math.ceil(retryDelay - diffMinutes));
+          cooldownReason = `Must wait ${retryDelay} minutes between attempts. Retry cooldown active (${remainingMinutes}m remaining).`;
         }
       }
     }
-    addGate(8, 'Retry Delay Gate', delayRespected, `Must wait ${retryDelay} minutes between attempts`);
+    addGate(8, 'Retry Delay Gate', delayRespected, cooldownReason || `Must wait ${retryDelay} minutes between attempts`);
 
-    // Gate 9: Allowed Calling Days Gate (Sunday=0, Monday=1, ..., Saturday=6)
-    const dayOfWeek = currentTime.getDay();
-    const allowedDays = ctx.voiceCampaign?.allowedCallingDays ?? callingPolicy.allowedCallingDays ?? [1, 2, 3, 4, 5];
-    const allowedDay = allowedDays.includes(dayOfWeek);
-    addGate(9, 'Allowed Calling Days Gate', allowedDay, `Calling not allowed on day ${dayOfWeek} of week`);
+    // Gate 9: Allowed Calling Days Gate (Timezone-Aware)
+    const effectiveTz = ctx.recipientTimezone || (ctx.lead as any)?.timezone;
+    const dayEvaluation = callingPolicyService.isAllowedCallingDay(callingPolicy, currentTime, effectiveTz);
+    addGate(
+      9,
+      'Allowed Calling Days Gate',
+      dayEvaluation.allowed,
+      dayEvaluation.allowed ? undefined : `Calling not allowed on day ${dayEvaluation.dayOfWeek} of week (${dayEvaluation.timezone})`
+    );
 
-    // Gate 10: Local Calling Window Hours Gate (HH:MM check)
-    const hours = String(currentTime.getHours()).padStart(2, '0');
-    const minutes = String(currentTime.getMinutes()).padStart(2, '0');
-    const currentHHMM = `${hours}:${minutes}`;
-    const windowStart = ctx.voiceCampaign?.callingWindowStart ?? callingPolicy.callingWindowStart ?? '09:00';
-    const windowEnd = ctx.voiceCampaign?.callingWindowEnd ?? callingPolicy.callingWindowEnd ?? '17:00';
-    const insideWindow = currentHHMM >= windowStart && currentHHMM <= windowEnd;
-    addGate(10, 'Local Calling Window Hours Gate', insideWindow, `Current time ${currentHHMM} is outside allowed window ${windowStart}-${windowEnd}`);
+    // Gate 10: Local Calling Window Hours Gate (Timezone-Aware)
+    const windowEvaluation = callingPolicyService.isWithinCallingWindow(callingPolicy, currentTime, effectiveTz);
+    addGate(
+      10,
+      'Local Calling Window Hours Gate',
+      windowEvaluation.inside,
+      windowEvaluation.inside
+        ? undefined
+        : `Current time ${windowEvaluation.currentHHMM} is outside allowed window ${windowEvaluation.window} (${windowEvaluation.timezone})`
+    );
 
     // Gate 11: Lead Status Qualification Gate
     const leadQualified = ctx.lead.status !== 'DISQUALIFIED' && ctx.lead.status !== 'OPT_OUT';

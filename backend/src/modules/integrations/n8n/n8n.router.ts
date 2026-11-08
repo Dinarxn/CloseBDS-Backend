@@ -101,6 +101,23 @@ export const n8nRouter: FastifyPluginAsync = async (fastify) => {
     }
   );
 
+  fastify.post(
+    '/deliveries/:id/retry',
+    {
+      preHandler: [requireAuthenticatedUser, requireWorkspaceContext, requireRole(['OWNER', 'ADMIN'])],
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const { workspaceId } = request.workspaceContext!;
+      const { id } = request.params as { id: string };
+      const updated = await n8nService.retryDelivery(id, workspaceId);
+      return reply.status(200).send({
+        success: true,
+        data: updated,
+        message: `Webhook delivery attempt completed with status ${updated.status}`,
+      });
+    }
+  );
+
   // ==========================================
   // 2. n8n Autonomous Workflow Execution Endpoints
   // Authenticated strictly via X-N8N-API-Key with scoped authorization

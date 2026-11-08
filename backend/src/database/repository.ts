@@ -2812,6 +2812,12 @@ export class N8nIntegrationRepository {
     });
   }
 
+  async findDeliveryById(id: string, workspaceId: string): Promise<N8nWebhookDelivery | null> {
+    return this.prisma.n8nWebhookDelivery.findFirst({
+      where: { id, workspaceId },
+    });
+  }
+
   async findDeliveries(
     workspaceId: string,
     filter: { limit?: number; status?: string } = {}

@@ -82,3 +82,8 @@ export interface VoiceProviderAdapter extends BaseProviderAdapter, CallingServic
   ): boolean;
   normalizeEvent(rawPayload: unknown): NormalizedCallEvent;
 }
+
+export * from './calling.adapter.js';
+export * from './twilio.adapter.js';
+export * from './mock-telephony.adapter.js';
+export * from './mock-fixtures.js';
