@@ -1,6 +1,7 @@
 import { buildApp } from './app.js';
 import { config } from '../config/index.js';
 import { databaseClient } from '../database/client.js';
+import { phoneNumbersService } from '../modules/voice/phone-numbers.service.js';
 
 async function main(): Promise<void> {
   const app = await buildApp();
@@ -35,6 +36,13 @@ async function main(): Promise<void> {
       const dbHealth = await databaseClient.healthCheck();
       if (dbHealth.ready) {
         app.log.info(`[Startup] Database connection verified (${dbHealth.status}, latency: ${dbHealth.latencyMs ?? 0}ms)`);
+        // Hydrate carrier-registered phone numbers from PostgreSQL on startup
+        try {
+          const hydratedCount = await phoneNumbersService.hydrateFromDatabase();
+          app.log.info(`[Startup] Hydrated ${hydratedCount} active telephony phone numbers from PostgreSQL`);
+        } catch (hydrateErr) {
+          app.log.warn({ err: hydrateErr }, '[Startup] Failed to hydrate phone numbers from database');
+        }
       } else {
         app.log.warn(`[Startup] Database initial check: ${dbHealth.message} (${dbHealth.status})`);
       }

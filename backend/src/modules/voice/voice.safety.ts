@@ -1,6 +1,6 @@
 import { BadRequestError } from '../../core/errors/api-error.js';
 import type { VoiceSafetyContext, VoiceSafetyCheckResult } from './voice.types.js';
-import { suppressionRepository, voiceRepository } from '../../database/repository.js';
+import { suppressionRepository, voiceRepository, settingsRepository, workspaceProviderCredentialRepository } from '../../database/repository.js';
 import { providerRegistry } from '../../integrations/core/provider.registry.js';
 import type { VoiceProviderAdapter } from '../../integrations/calling/index.js';
 import { callingPolicyService } from './calling-policy.service.js';
@@ -151,15 +151,21 @@ export class VoiceSafetyEvaluator {
     const isWorkspaceKill = !callingPolicy.isActive;
     const isCampaignInactive = Boolean(ctx.campaign && ctx.campaign.status !== 'ACTIVE');
 
+    // Dual-layer verification: Also check Workspace SettingsRepository kill-switch state
+    const workspaceSettings = await settingsRepository.getWorkspaceSettings(ctx.workspaceId);
+    const isSettingsKill = workspaceSettings.killSwitchActive;
+
     let policyActive = true;
     let policyReason: string | undefined;
 
     if (isGlobalKill) {
       policyActive = false;
       policyReason = 'Global Emergency Kill Switch is active. All voice outreach is suspended.';
-    } else if (isWorkspaceKill) {
+    } else if (isWorkspaceKill || isSettingsKill) {
       policyActive = false;
-      policyReason = `Emergency Kill Switch is active for workspace ${ctx.workspaceId}. Calling is halted.`;
+      policyReason = isSettingsKill
+        ? `Workspace Settings Kill Switch is active for workspace ${ctx.workspaceId}. Calling is halted.`
+        : `Emergency Kill Switch is active for workspace ${ctx.workspaceId}. Calling is halted.`;
     } else if (isCampaignInactive) {
       policyActive = false;
       policyReason = `Campaign status is '${ctx.campaign!.status}', must be 'ACTIVE'`;
@@ -167,7 +173,7 @@ export class VoiceSafetyEvaluator {
 
     const gate5Name = isCampaignInactive
       ? 'Campaign Active Status Gate'
-      : isGlobalKill || isWorkspaceKill
+      : isGlobalKill || isWorkspaceKill || isSettingsKill
       ? 'Emergency Kill Switch Gate'
       : 'Workspace Calling Policy Gate';
 
@@ -240,17 +246,51 @@ export class VoiceSafetyEvaluator {
     const hasProhibitedClaims = Boolean(
       ctx.agentConfig?.prohibitedClaims && ctx.agentConfig.prohibitedClaims.length > 0
     );
-    addGate(14, 'Anti-Hallucination Guardrails Gate', hasProhibitedClaims || true);
+    addGate(
+      14,
+      'Anti-Hallucination Guardrails Gate',
+      hasProhibitedClaims,
+      'Voice agent configuration lacks required prohibitedClaims anti-hallucination guardrails'
+    );
 
     // Gate 15: Telephony Provider Configured Gate
     const callingAdapter = providerRegistry.getAdapter<VoiceProviderAdapter>('Twilio');
-    const telephonyConfigured = callingAdapter ? callingAdapter.isConfigured() : false;
-    addGate(15, 'Telephony Provider Configured Gate', telephonyConfigured, 'Twilio telephony credentials are not configured in backend');
+    let workspaceTwilioCred = null;
+    try {
+      workspaceTwilioCred = await workspaceProviderCredentialRepository.findByProvider(ctx.workspaceId, 'TWILIO');
+    } catch {
+      // Non-blocking fallback
+    }
+    const telephonyConfigured = Boolean(
+      workspaceTwilioCred?.encryptedPayload ||
+      (callingAdapter && callingAdapter.isConfigured())
+    );
+    addGate(
+      15,
+      'Telephony Provider Configured Gate',
+      telephonyConfigured,
+      'Telephony credentials are not configured for this workspace'
+    );
 
     // Gate 16: Voice AI Provider Configured Gate
+    const agentProvider = ctx.agentConfig?.provider || 'retell';
+    let workspaceVoiceAICred = null;
+    try {
+      workspaceVoiceAICred = await workspaceProviderCredentialRepository.findByProvider(ctx.workspaceId, agentProvider);
+    } catch {
+      // Non-blocking fallback
+    }
     const aiAdapter = providerRegistry.getByCategory('AI_LLM')[0];
-    const aiConfigured = aiAdapter ? aiAdapter.isConfigured() : false;
-    addGate(16, 'Voice AI Provider Configured Gate', aiConfigured || true);
+    const voiceAiConfigured = Boolean(
+      workspaceVoiceAICred?.encryptedPayload ||
+      (aiAdapter && aiAdapter.isConfigured())
+    );
+    addGate(
+      16,
+      'Voice AI Provider Configured Gate',
+      voiceAiConfigured,
+      `Voice AI provider '${agentProvider}' credentials are not configured for this workspace`
+    );
 
     // Gate 17: Concurrent Call Capacity Gate
     const activeCalls = ctx.activeCallsCount ?? (await voiceRepository.countActiveCalls(ctx.workspaceId));

@@ -212,6 +212,15 @@ export class VoiceWebhookService {
         }
       }
 
+      // Idempotently persist late-arriving recording metadata
+      if (event.recordingUrl && (!call.recordingUrl || call.recordingUrl !== event.recordingUrl)) {
+        await voiceRepository.updateCallStatus(call.id, call.workspaceId, call.status, {
+          recordingUrl: event.recordingUrl,
+          recordingDuration: event.durationSeconds ?? call.recordingDuration,
+          recordingChannels: 1,
+        }).catch(() => {});
+      }
+
       return {
         received: true,
         processed: true,
@@ -236,7 +245,17 @@ export class VoiceWebhookService {
       await voiceRepository.updateCallStatus(call.id, call.workspaceId, targetPrismaStatus, {
         durationSeconds: event.durationSeconds ?? call.durationSeconds,
         completedAt: isTerminalCallStatus(targetPrismaStatus) ? new Date() : undefined,
+        recordingUrl: event.recordingUrl ?? call.recordingUrl,
+        recordingDuration: event.durationSeconds ?? call.recordingDuration,
+        recordingChannels: 1,
       });
+    } else if (event.recordingUrl && (!call.recordingUrl || call.recordingUrl !== event.recordingUrl)) {
+      await voiceRepository.updateCallStatus(call.id, call.workspaceId, call.status, {
+        durationSeconds: event.durationSeconds ?? call.durationSeconds,
+        recordingUrl: event.recordingUrl,
+        recordingDuration: event.durationSeconds ?? call.recordingDuration,
+        recordingChannels: 1,
+      }).catch(() => {});
     }
 
     // Save transcript turns if provided

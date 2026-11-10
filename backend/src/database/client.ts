@@ -14,9 +14,35 @@ export interface DatabaseClient {
   disconnect(): Promise<void>;
   isConnected(): boolean;
   healthCheck(): Promise<DatabaseReadinessResult>;
-  transaction<T>(callback: (prisma: PrismaClient) => Promise<T>): Promise<T>;
+  transaction<T>(
+    callback: (prisma: PrismaClient) => Promise<T>,
+    options?: { maxWait?: number; timeout?: number }
+  ): Promise<T>;
   getPrismaClient(): PrismaClient;
   setPrismaClient?(prisma: PrismaClient | null): void;
+}
+
+/**
+ * Formats PostgreSQL database URL with connection pool parameters safely
+ * preserving existing query parameters (schema, sslmode, etc.).
+ */
+export function formatDatabaseUrlWithPoolParams(
+  rawUrl: string,
+  poolMax: number = config.DATABASE_POOL_MAX || 10,
+  poolTimeoutSec = 10
+): string {
+  try {
+    const parsed = new URL(rawUrl);
+    if (!parsed.searchParams.has('connection_limit')) {
+      parsed.searchParams.set('connection_limit', String(poolMax));
+    }
+    if (!parsed.searchParams.has('pool_timeout')) {
+      parsed.searchParams.set('pool_timeout', String(poolTimeoutSec));
+    }
+    return parsed.toString();
+  } catch {
+    return rawUrl;
+  }
 }
 
 /**
@@ -50,7 +76,7 @@ export class PrismaDatabaseClient implements DatabaseClient {
       this.prisma = new PrismaClient({
         datasources: {
           db: {
-            url: this.databaseUrl,
+            url: formatDatabaseUrlWithPoolParams(this.databaseUrl),
           },
         },
         log:
@@ -90,11 +116,20 @@ export class PrismaDatabaseClient implements DatabaseClient {
   /**
    * Executes atomic database transaction.
    */
-  async transaction<T>(callback: (prisma: PrismaClient) => Promise<T>): Promise<T> {
+  async transaction<T>(
+    callback: (prisma: PrismaClient) => Promise<T>,
+    options?: { maxWait?: number; timeout?: number }
+  ): Promise<T> {
     const prisma = this.getPrismaClient();
-    return prisma.$transaction(async (tx) => {
-      return callback(tx as unknown as PrismaClient);
-    });
+    return prisma.$transaction(
+      async (tx) => {
+        return callback(tx as unknown as PrismaClient);
+      },
+      {
+        maxWait: options?.maxWait ?? 5000,
+        timeout: options?.timeout ?? 10000,
+      }
+    );
   }
 
   /**
@@ -161,7 +196,9 @@ export class PrismaDatabaseClient implements DatabaseClient {
       this.prisma = new PrismaClient({
         datasources: {
           db: {
-            url: this.databaseUrl || 'postgresql://unconfigured@localhost:5432/closevds',
+            url: formatDatabaseUrlWithPoolParams(
+              this.databaseUrl || 'postgresql://unconfigured@localhost:5432/closevds'
+            ),
           },
         },
       });

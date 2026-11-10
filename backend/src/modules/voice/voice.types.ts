@@ -643,12 +643,19 @@ export interface CreateVoiceAgentStudioInput {
   name: string;
   provider: VoiceAgentProviderType;
   modelId?: string;
+  temperature?: number;
+  maxTokens?: number;
   voiceId?: string;
+  voiceProvider?: string;
+  voiceSpeed?: number;
+  voicePitch?: number;
+  voiceStability?: number;
   callObjective: string;
   openingScript: string;
   agentPersona?: string;
   speakingStyle?: string;
   approvedTalkingPoints: string[];
+  knowledgePoints?: any[];
   prohibitedClaims: string[];
   qualificationQuestions: string[];
   structuredQuestions?: QualificationQuestion[];
@@ -659,6 +666,8 @@ export interface CreateVoiceAgentStudioInput {
   assignedPhoneNumberId?: string | null;
   safety?: Partial<VoiceAgentSafetyGuardrails>;
   maxDurationSeconds?: number;
+  inboundEnabled?: boolean;
+  outboundEnabled?: boolean;
 }
 
 export interface UpdateVoiceAgentStudioInput extends Partial<CreateVoiceAgentStudioInput> {

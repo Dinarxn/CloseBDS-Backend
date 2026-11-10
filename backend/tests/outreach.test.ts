@@ -381,6 +381,26 @@ async function runOutreachTests() {
     const getBody = JSON.parse(getRes.payload);
     assert.equal(getBody.draft.recipientEmail, 'john@apexdental.com');
 
+    // Authenticated patch draft by ID - dual envelope check
+    const patchRes = await app.inject({
+      method: 'PATCH',
+      url: `/api/v1/outreach/${draft.id}`,
+      headers: {
+        authorization: `Bearer ${tokenA}`,
+        'content-type': 'application/json',
+      },
+      payload: {
+        subject: 'Updated subject via PATCH route',
+      },
+    });
+    assert.equal(patchRes.statusCode, 200);
+    const patchBody = JSON.parse(patchRes.payload);
+    assert.equal(patchBody.success, true);
+    assert.ok(patchBody.draft, 'Envelope must contain draft');
+    assert.ok(patchBody.data, 'Envelope must contain data');
+    assert.equal(patchBody.data.subject, 'Updated subject via PATCH route');
+    assert.equal(patchBody.draft.subject, 'Updated subject via PATCH route');
+
     // Cross-tenant HTTP attempt -> 404
     const crossRes = await app.inject({
       method: 'GET',

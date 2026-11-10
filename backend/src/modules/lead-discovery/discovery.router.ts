@@ -24,6 +24,12 @@ export const discoveryRouter: FastifyPluginAsync = async (fastify): Promise<void
     return reply.status(200).send({
       success: true,
       ...result,
+      data: {
+        discovered: result.discoveredCount,
+        candidates: result.candidates,
+        persisted: result.persistedCount,
+        skippedDuplicates: result.skippedDuplicateCount,
+      },
     });
   });
 

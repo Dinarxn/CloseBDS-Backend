@@ -78,6 +78,18 @@ export class KillSwitchActiveError extends ApiError {
   }
 }
 
+export class UnprocessableEntityError extends ApiError {
+  constructor(message = 'Unprocessable Entity', details?: unknown) {
+    super(422, 'UNPROCESSABLE_ENTITY', message, details);
+  }
+}
+
+export class ServiceUnavailableError extends ApiError {
+  constructor(message = 'Service Unavailable', details?: unknown) {
+    super(503, 'SERVICE_UNAVAILABLE', message, details);
+  }
+}
+
 export class InternalServerError extends ApiError {
   constructor(message = 'Internal Server Error', details?: unknown) {
     super(500, 'INTERNAL_SERVER_ERROR', message, details, false);

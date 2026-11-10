@@ -46,6 +46,11 @@ export const createLeadSchema = z.object({
   phone: z.string().max(50).optional(),
   address: z.string().max(255).optional(),
   status: leadStatusEnum.default('NEW').optional(),
+  practiceType: z.string().max(100).optional(),
+  chairCount: z.coerce.number().int().nonnegative().optional(),
+  doctorCount: z.coerce.number().int().nonnegative().optional(),
+  googleRating: z.coerce.number().min(0).max(5).optional(),
+  googleReviewCount: z.coerce.number().int().nonnegative().optional(),
   contacts: z.array(createContactSchema).optional(),
 });
 
@@ -55,6 +60,11 @@ export const updateLeadSchema = z.object({
   phone: z.string().max(50).optional(),
   address: z.string().max(255).optional(),
   status: leadStatusEnum.optional(),
+  practiceType: z.string().max(100).optional(),
+  chairCount: z.coerce.number().int().nonnegative().optional(),
+  doctorCount: z.coerce.number().int().nonnegative().optional(),
+  googleRating: z.coerce.number().min(0).max(5).optional(),
+  googleReviewCount: z.coerce.number().int().nonnegative().optional(),
 });
 
 export const leadQuerySchema = z.object({

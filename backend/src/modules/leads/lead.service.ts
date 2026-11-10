@@ -35,9 +35,22 @@ export class LeadService {
     });
 
     const payload = (lead.leadSource?.queryPayload || {}) as Record<string, any>;
+    const numericRating = lead.googleRating != null
+      ? Number(lead.googleRating)
+      : (typeof payload.rating === 'number' ? payload.rating : undefined);
+    const reviewCount = lead.googleReviewCount != null
+      ? lead.googleReviewCount
+      : (typeof payload.userRatingsTotal === 'number' ? payload.userRatingsTotal : undefined);
 
     return {
       ...lead,
+      practiceType: lead.practiceType ?? undefined,
+      chairCount: lead.chairCount ?? undefined,
+      doctorCount: lead.doctorCount ?? undefined,
+      googleRating: numericRating,
+      googleReviewCount: reviewCount,
+      rating: numericRating,
+      userRatingsTotal: reviewCount,
       serviceRecommendation,
       campaign: lead.campaign || undefined,
       source: lead.leadSource?.provider || (payload.sourceProvider as string) || undefined,
@@ -52,8 +65,6 @@ export class LeadService {
       mapsUrl: (payload.mapsUrl as string) || undefined,
       mapsMatchStatus: (payload.mapsMatchStatus as string) || undefined,
       placeId: (payload.placeId as string) || undefined,
-      rating: typeof payload.rating === 'number' ? payload.rating : undefined,
-      userRatingsTotal: typeof payload.userRatingsTotal === 'number' ? payload.userRatingsTotal : undefined,
       metadata: payload.metadata || (Object.keys(payload).length > 0 ? payload : undefined),
       actionability: payload.actionability || undefined,
     };
@@ -102,13 +113,15 @@ export class LeadService {
     userId: string | undefined,
     data: CreateLeadInput
   ): Promise<LeadWithDetails> {
-    // 1. Deduplication check via 4-factor match key
-    const duplicate = await this.leadRepo.findByMatchKey(
+    // 1. Deduplication check via 4-tier fuzzy deduplication engine
+    const duplicate = await this.leadRepo.findExistingLeadForDiscovery(
       workspaceId,
-      data.businessName,
-      data.domain,
-      data.phone,
-      data.address
+      {
+        businessName: data.businessName,
+        domain: data.domain,
+        phone: data.phone,
+        address: data.address,
+      }
     );
 
     if (duplicate) {
@@ -126,6 +139,11 @@ export class LeadService {
       phone: data.phone,
       address: data.address,
       status: data.status,
+      practiceType: data.practiceType,
+      chairCount: data.chairCount,
+      doctorCount: data.doctorCount,
+      googleRating: data.googleRating,
+      googleReviewCount: data.googleReviewCount,
       contacts: data.contacts,
     });
 

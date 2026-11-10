@@ -213,7 +213,45 @@ export class IntegrationService {
     let matchedWorkspaceId: string | undefined;
     let matchedLeadId: string | undefined;
 
-    if (normalized.recipientEmail) {
+    // Disambiguate by outbound messageId/providerMessageId first before falling back to email
+    if (normalized.messageId) {
+      try {
+        const emailMsg = await (this.prisma.emailMessage as any).findFirst({
+          where: {
+            OR: [
+              { id: normalized.messageId },
+              { providerMessageId: normalized.messageId },
+            ],
+          },
+          include: {
+            emailCampaign: { include: { campaign: true } },
+            contact: { include: { lead: true } },
+          },
+        });
+        if (emailMsg?.emailCampaign?.campaign?.workspaceId) {
+          matchedWorkspaceId = emailMsg.emailCampaign.campaign.workspaceId;
+          matchedLeadId = emailMsg.contact?.leadId || emailMsg.contact?.lead?.id;
+        }
+      } catch {
+        try {
+          const emailMsg = await this.prisma.emailMessage.findFirst({
+            where: { id: normalized.messageId },
+            include: {
+              emailCampaign: { include: { campaign: true } },
+              contact: { include: { lead: true } },
+            },
+          });
+          if (emailMsg?.emailCampaign?.campaign?.workspaceId) {
+            matchedWorkspaceId = emailMsg.emailCampaign.campaign.workspaceId;
+            matchedLeadId = emailMsg.contact?.leadId || emailMsg.contact?.lead?.id;
+          }
+        } catch {
+          // Fall back gracefully
+        }
+      }
+    }
+
+    if (!matchedWorkspaceId && normalized.recipientEmail) {
       const contact = await this.prisma.contact.findFirst({
         where: { email: normalized.recipientEmail },
         include: { lead: { select: { id: true, workspaceId: true, status: true } } },
@@ -445,7 +483,7 @@ export class IntegrationService {
     const skip = (page - 1) * limit;
 
     const allEvents = Array.from(this.processedEventsStore.values()).filter((e) => {
-      const matchWs = !e.workspaceId || e.workspaceId === workspaceId;
+      const matchWs = Boolean(e.workspaceId && e.workspaceId === workspaceId);
       const matchProv = !query.provider || e.provider === query.provider;
       const matchType = !query.eventType || e.eventType === query.eventType;
       const matchSearch =

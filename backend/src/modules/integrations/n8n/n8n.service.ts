@@ -3,6 +3,7 @@ import { n8nIntegrationRepository } from '../../../database/repository.js';
 import type { N8nKeyCreationResult, N8nIntegrationRecord } from './n8n.types.js';
 import { BadRequestError, NotFoundError } from '../../../core/errors/api-error.js';
 import type { N8nWebhookDelivery } from '@prisma/client';
+import { validateUrlForAudit } from '../../../security/ssrf.guard.js';
 
 export class N8nService {
   /**
@@ -17,6 +18,13 @@ export class N8nService {
   ): Promise<N8nKeyCreationResult> {
     if (!name || name.trim().length === 0) {
       throw new BadRequestError('Integration name is required');
+    }
+
+    if (webhookUrl) {
+      const ssrfCheck = validateUrlForAudit(webhookUrl);
+      if (!ssrfCheck.safe) {
+        throw new BadRequestError(`Invalid or unsafe webhook URL: ${ssrfCheck.error}`);
+      }
     }
 
     // Generate random 32-byte secret
@@ -94,6 +102,22 @@ export class N8nService {
     const secret = process.env.N8N_WEBHOOK_SECRET || process.env.JWT_SECRET || 'closevds_webhook_secret_key';
 
     for (const target of targets) {
+      if (!target.webhookUrl) continue;
+
+      const ssrfCheck = validateUrlForAudit(target.webhookUrl);
+      if (!ssrfCheck.safe) {
+        await n8nIntegrationRepository.createDelivery({
+          workspaceId,
+          integrationId: target.id,
+          eventId: `evt_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+          eventType,
+          payload: { eventType, workspaceId, data },
+          status: 'FAILED',
+          lastError: `SSRF validation blocked outbound dispatch: ${ssrfCheck.error}`,
+        });
+        continue;
+      }
+
       const eventId = `evt_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
       const payload = {
         eventId,
@@ -155,6 +179,11 @@ export class N8nService {
     const target = integrations.find((i) => i.id === delivery.integrationId && i.isActive && i.webhookUrl);
     if (!target || !target.webhookUrl) {
       throw new BadRequestError('Integration does not have a configured active webhook URL');
+    }
+
+    const ssrfCheck = validateUrlForAudit(target.webhookUrl);
+    if (!ssrfCheck.safe) {
+      throw new BadRequestError(`SSRF validation blocked outbound webhook delivery: ${ssrfCheck.error}`);
     }
 
     const secret = process.env.N8N_WEBHOOK_SECRET || process.env.JWT_SECRET || 'closevds_webhook_secret_key';

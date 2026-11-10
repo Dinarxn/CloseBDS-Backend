@@ -567,13 +567,15 @@ export class DiscoveryDomainService {
         continue;
       }
 
-      // Layer 2: 4-Factor match key deduplication
-      const matchedLead = await this.leadRepo.findByMatchKey(
+      // Layer 2: 4-Tier fuzzy deduplication engine
+      const matchedLead = await this.leadRepo.findExistingLeadForDiscovery(
         workspaceId,
-        businessName,
-        domain || undefined,
-        phone || undefined,
-        address || undefined
+        {
+          businessName,
+          domain: domain || undefined,
+          phone: phone || undefined,
+          address: address || undefined,
+        }
       );
 
       if (matchedLead) {

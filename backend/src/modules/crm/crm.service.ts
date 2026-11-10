@@ -2,15 +2,21 @@ import {
   LeadRepository,
   CRMActivityRepository,
   AuditRepository,
+  AppointmentRepository,
   leadRepository as defaultLeadRepo,
   crmActivityRepository as defaultCRMRepo,
   auditRepository as defaultAuditRepo,
+  appointmentRepository as defaultAppointmentRepo,
+  type CreateAppointmentInput,
+  type UpdateAppointmentInput,
+  type AppointmentQueryFilter,
+  type PaginationResult,
 } from '../../database/repository.js';
 import { databaseClient, type DatabaseClient } from '../../database/client.js';
 import { NotFoundError, BadRequestError } from '../../core/errors/api-error.js';
 import type { RecordCRMActivityBody, UpdateLeadStageBody } from './crm.schema.js';
 import type { LeadCRMProfile, CRMActivity } from './crm.types.js';
-import type { Lead } from '@prisma/client';
+import type { Lead, Appointment, AppointmentStatus } from '@prisma/client';
 import type { CanonicalLeadStatus } from '../voice/voice.types.js';
 
 /**
@@ -50,35 +56,61 @@ export const ALLOWED_STAGE_TRANSITIONS: Record<CanonicalLeadStatus, CanonicalLea
 };
 
 export class CRMService {
+  private leadRepo: LeadRepository;
+  private crmRepo: CRMActivityRepository;
+  private auditLogger: AuditRepository;
+  private appointmentRepo: AppointmentRepository;
+  private db: DatabaseClient;
+
   constructor(
-    private leadRepo: LeadRepository = defaultLeadRepo,
-    private crmRepo: CRMActivityRepository = defaultCRMRepo,
-    private auditLogger: AuditRepository = defaultAuditRepo,
-    private db: DatabaseClient = databaseClient
-  ) {}
+    leadRepo: LeadRepository = defaultLeadRepo,
+    crmRepo: CRMActivityRepository = defaultCRMRepo,
+    auditLogger: AuditRepository = defaultAuditRepo,
+    appointmentRepoOrDb?: AppointmentRepository | DatabaseClient,
+    dbClient?: DatabaseClient
+  ) {
+    this.leadRepo = leadRepo;
+    this.crmRepo = crmRepo;
+    this.auditLogger = auditLogger;
+    if (appointmentRepoOrDb && 'getPrismaClient' in appointmentRepoOrDb) {
+      this.db = appointmentRepoOrDb;
+      this.appointmentRepo = new AppointmentRepository(appointmentRepoOrDb);
+    } else {
+      this.appointmentRepo = (appointmentRepoOrDb as AppointmentRepository) || defaultAppointmentRepo;
+      this.db = dbClient || databaseClient;
+    }
+  }
 
   /**
    * Retrieves complete CRM profile for a lead including timeline activities.
    */
-  async getLeadCRMProfile(leadId: string, workspaceId: string): Promise<LeadCRMProfile> {
+  async getLeadCRMProfile(leadId: string, workspaceId: string): Promise<LeadCRMProfile & { appointments: Appointment[] }> {
     const lead = await this.leadRepo.findById(leadId, workspaceId);
     if (!lead) {
       throw new NotFoundError('Lead not found or access denied for this workspace');
     }
 
-    const activities = await this.crmRepo.findManyByLeadId(leadId, workspaceId);
+    const [activities, appointments] = await Promise.all([
+      this.crmRepo.findManyByLeadId(leadId, workspaceId),
+      this.appointmentRepo.findManyByLeadId(leadId, workspaceId),
+    ]);
 
     return {
       lead,
       activities,
+      appointments,
     };
   }
 
   /**
    * Retrieves timeline activities for a lead.
    */
-  async getLeadActivities(leadId: string, workspaceId: string): Promise<CRMActivity[]> {
-    return this.crmRepo.findManyByLeadId(leadId, workspaceId);
+  async getLeadActivities(
+    leadId: string,
+    workspaceId: string,
+    options?: { page?: number; limit?: number }
+  ): Promise<CRMActivity[]> {
+    return this.crmRepo.findManyByLeadId(leadId, workspaceId, options);
   }
 
   /**
@@ -222,6 +254,207 @@ export class CRMService {
     });
 
     return result;
+  }
+
+  // --- Dedicated Appointment Operations ---
+
+  /**
+   * Creates a scheduled appointment for a lead in the workspace.
+   */
+  async createAppointment(
+    workspaceId: string,
+    userId: string | undefined,
+    data: CreateAppointmentInput
+  ): Promise<Appointment> {
+    const lead = await this.leadRepo.findById(data.leadId, workspaceId);
+    if (!lead) {
+      throw new NotFoundError('Lead not found or access denied for this workspace');
+    }
+
+    const appointment = await this.appointmentRepo.create(workspaceId, {
+      leadId: data.leadId,
+      contactId: data.contactId,
+      userId: data.userId || userId,
+      title: data.title || 'Meeting',
+      scheduledStartTime: new Date(data.scheduledStartTime),
+      scheduledEndTime: new Date(data.scheduledEndTime),
+      meetingLink: data.meetingLink,
+      notes: data.notes,
+      status: data.status,
+    });
+
+    try {
+      await this.crmRepo.create(workspaceId, {
+        leadId: data.leadId,
+        userId,
+        type: 'NOTE',
+        description: `Booked appointment: ${appointment.title} on ${new Date(data.scheduledStartTime).toISOString()}`,
+        metadata: {
+          appointmentId: appointment.id,
+          scheduledStartTime: data.scheduledStartTime,
+          scheduledEndTime: data.scheduledEndTime,
+        },
+      });
+    } catch {
+      // Non-blocking activity log
+    }
+
+    try {
+      await this.auditLogger.create({
+        workspaceId,
+        userId,
+        eventType: 'crm:appointment_created',
+        entityType: 'Appointment',
+        entityId: appointment.id,
+        metadata: {
+          leadId: data.leadId,
+          title: appointment.title,
+          scheduledStartTime: appointment.scheduledStartTime,
+        },
+      });
+    } catch {
+      // Non-blocking audit
+    }
+
+    return appointment;
+  }
+
+  /**
+   * Retrieves single appointment scoped to workspace.
+   */
+  async getAppointment(id: string, workspaceId: string): Promise<Appointment> {
+    const appointment = await this.appointmentRepo.findById(id, workspaceId);
+    if (!appointment) {
+      throw new NotFoundError('Appointment not found or access denied for this workspace');
+    }
+    return appointment;
+  }
+
+  /**
+   * Lists all appointments for a specific lead scoped to workspace.
+   */
+  async listAppointmentsForLead(leadId: string, workspaceId: string): Promise<Appointment[]> {
+    const lead = await this.leadRepo.findById(leadId, workspaceId);
+    if (!lead) {
+      throw new NotFoundError('Lead not found or access denied for this workspace');
+    }
+    return this.appointmentRepo.findManyByLeadId(leadId, workspaceId);
+  }
+
+  /**
+   * Lists paginated appointments across workspace with optional filters.
+   */
+  async listAppointments(
+    workspaceId: string,
+    query: AppointmentQueryFilter = {}
+  ): Promise<PaginationResult<Appointment>> {
+    return this.appointmentRepo.findManyPaginated(workspaceId, query);
+  }
+
+  /**
+   * Updates an existing appointment.
+   */
+  async updateAppointment(
+    id: string,
+    workspaceId: string,
+    userId: string | undefined,
+    data: UpdateAppointmentInput
+  ): Promise<Appointment> {
+    const existing = await this.appointmentRepo.findById(id, workspaceId);
+    if (!existing) {
+      throw new NotFoundError('Appointment not found or access denied for this workspace');
+    }
+
+    const updated = await this.appointmentRepo.update(id, workspaceId, {
+      contactId: data.contactId,
+      userId: data.userId,
+      title: data.title,
+      scheduledStartTime: data.scheduledStartTime ? new Date(data.scheduledStartTime) : undefined,
+      scheduledEndTime: data.scheduledEndTime ? new Date(data.scheduledEndTime) : undefined,
+      meetingLink: data.meetingLink,
+      status: data.status,
+      notes: data.notes,
+    });
+
+    if (data.status && data.status !== existing.status) {
+      try {
+        await this.crmRepo.create(workspaceId, {
+          leadId: existing.leadId,
+          userId,
+          type: 'NOTE',
+          description: `Appointment status updated from ${existing.status} to ${data.status}${data.notes ? `: ${data.notes}` : ''}`,
+          metadata: {
+            appointmentId: id,
+            previousStatus: existing.status,
+            newStatus: data.status,
+          },
+        });
+      } catch {
+        // Non-blocking activity log
+      }
+    }
+
+    try {
+      await this.auditLogger.create({
+        workspaceId,
+        userId,
+        eventType: 'crm:appointment_updated',
+        entityType: 'Appointment',
+        entityId: id,
+        metadata: {
+          previousStatus: existing.status,
+          newStatus: data.status,
+          updatedFields: Object.keys(data),
+        },
+      });
+    } catch {
+      // Non-blocking audit
+    }
+
+    return updated;
+  }
+
+  /**
+   * Convenience helper to update appointment status.
+   */
+  async updateAppointmentStatus(
+    id: string,
+    workspaceId: string,
+    userId: string | undefined,
+    status: AppointmentStatus,
+    notes?: string
+  ): Promise<Appointment> {
+    return this.updateAppointment(id, workspaceId, userId, { status, notes });
+  }
+
+  /**
+   * Deletes an appointment scoped to workspace.
+   */
+  async deleteAppointment(
+    id: string,
+    workspaceId: string,
+    userId: string | undefined
+  ): Promise<boolean> {
+    const existing = await this.appointmentRepo.findById(id, workspaceId);
+    if (!existing) {
+      throw new NotFoundError('Appointment not found or access denied for this workspace');
+    }
+
+    await this.appointmentRepo.delete(id, workspaceId);
+
+    try {
+      await this.auditLogger.create({
+        workspaceId,
+        userId,
+        eventType: 'crm:appointment_deleted',
+        entityType: 'Appointment',
+        entityId: id,
+      });
+    } catch {
+      // Non-blocking audit
+    }
+
+    return true;
   }
 }
 

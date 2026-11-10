@@ -30,7 +30,7 @@ import {
   requireWorkspaceContext,
   requireRole,
 } from '../../core/permissions/auth-guards.js';
-import { UnauthorizedError, NotFoundError } from '../../core/errors/api-error.js';
+import { UnauthorizedError, NotFoundError, BadRequestError, ForbiddenError } from '../../core/errors/api-error.js';
 import { telephonyService } from './telephony.service.js';
 import { phoneNumbersService } from './phone-numbers.service.js';
 import {
@@ -710,13 +710,7 @@ export const voiceRouter: FastifyPluginAsync = async (fastify) => {
         const rawBody = typeof request.body === 'string' ? request.body : JSON.stringify(request.body);
         const isValid = twilioAdapter.verifyWebhookSignature(rawBody, signature, authToken, url);
         if (!isValid) {
-          return reply.status(403).send({
-            success: false,
-            error: {
-              code: 'FORBIDDEN',
-              message: 'Invalid Twilio webhook HMAC-SHA1 signature',
-            },
-          });
+          throw new ForbiddenError('Invalid Twilio webhook HMAC-SHA1 signature');
         }
       }
 
@@ -931,8 +925,9 @@ export const voiceRouter: FastifyPluginAsync = async (fastify) => {
     {
       preHandler: [requireAuthenticatedUser, requireWorkspaceContext],
     },
-    async (_request: FastifyRequest, reply: FastifyReply) => {
-      const cards = await voiceAIService.listProviderCards();
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const { workspaceId } = request.workspaceContext!;
+      const cards = await voiceAIService.listProviderCards(workspaceId);
       return reply.status(200).send({
         success: true,
         data: cards,
@@ -981,10 +976,7 @@ export const voiceRouter: FastifyPluginAsync = async (fastify) => {
         credentials?: Record<string, unknown>;
       };
       if (!providerId) {
-        return reply.status(400).send({
-          success: false,
-          message: 'providerId is required (retell | vapi)',
-        });
+        throw new BadRequestError('providerId is required (retell | vapi)');
       }
       const result = await voiceAIService.testConnection(providerId, credentials);
       return reply.status(200).send({
@@ -1006,12 +998,10 @@ export const voiceRouter: FastifyPluginAsync = async (fastify) => {
         credentials: Record<string, string>;
       };
       if (!providerId) {
-        return reply.status(400).send({
-          success: false,
-          message: 'providerId is required (retell | vapi)',
-        });
+        throw new BadRequestError('providerId is required (retell | vapi)');
       }
-      const card = await voiceAIService.updateCredentials(providerId, credentials || {});
+      const { workspaceId } = request.workspaceContext!;
+      const card = await voiceAIService.updateCredentials(providerId, credentials || {}, workspaceId);
       return reply.status(200).send({
         success: true,
         data: card,

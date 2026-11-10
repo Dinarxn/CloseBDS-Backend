@@ -29,6 +29,7 @@ export const leadRouter: FastifyPluginAsync = async (fastify): Promise<void> => 
     return reply.status(200).send({
       success: true,
       ...result,
+      items: result.data,
     });
   });
 

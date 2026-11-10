@@ -8,6 +8,7 @@ import {
 import {
   requireAuthenticatedUser,
   requireWorkspaceContext,
+  requireRole,
 } from '../../core/permissions/auth-guards.js';
 
 export const campaignRouter: FastifyPluginAsync = async (fastify): Promise<void> => {
@@ -24,6 +25,7 @@ export const campaignRouter: FastifyPluginAsync = async (fastify): Promise<void>
     return reply.status(200).send({
       success: true,
       ...result,
+      items: result.data,
     });
   });
 
@@ -39,45 +41,105 @@ export const campaignRouter: FastifyPluginAsync = async (fastify): Promise<void>
   });
 
   // 3. POST /api/v1/campaigns
-  fastify.post('/', async (request, reply) => {
-    const workspaceId = request.workspaceContext!.workspaceId;
-    const userId = request.workspaceContext!.userId;
-    const body = createCampaignSchema.parse(request.body);
-    const campaign = await campaignService.createCampaign(workspaceId, userId, body);
+  fastify.post(
+    '/',
+    { preHandler: [requireRole(['OWNER', 'ADMIN'])] },
+    async (request, reply) => {
+      const workspaceId = request.workspaceContext!.workspaceId;
+      const userId = request.workspaceContext!.userId;
+      const body = createCampaignSchema.parse(request.body);
+      const campaign = await campaignService.createCampaign(workspaceId, userId, body);
 
-    return reply.status(201).send({
-      success: true,
-      campaign,
-    });
-  });
+      return reply.status(201).send({
+        success: true,
+        campaign,
+      });
+    }
+  );
 
   // 4. PATCH /api/v1/campaigns/:id
-  fastify.patch<{ Params: { id: string } }>('/:id', async (request, reply) => {
-    const workspaceId = request.workspaceContext!.workspaceId;
-    const userId = request.workspaceContext!.userId;
-    const body = updateCampaignSchema.parse(request.body);
-    const campaign = await campaignService.updateCampaign(
-      request.params.id,
-      workspaceId,
-      userId,
-      body
-    );
+  fastify.patch<{ Params: { id: string } }>(
+    '/:id',
+    { preHandler: [requireRole(['OWNER', 'ADMIN'])] },
+    async (request, reply) => {
+      const workspaceId = request.workspaceContext!.workspaceId;
+      const userId = request.workspaceContext!.userId;
+      const body = updateCampaignSchema.parse(request.body);
+      const campaign = await campaignService.updateCampaign(
+        request.params.id,
+        workspaceId,
+        userId,
+        body
+      );
 
-    return reply.status(200).send({
-      success: true,
-      campaign,
-    });
-  });
+      return reply.status(200).send({
+        success: true,
+        campaign,
+      });
+    }
+  );
 
   // 5. DELETE /api/v1/campaigns/:id
-  fastify.delete<{ Params: { id: string } }>('/:id', async (request, reply) => {
-    const workspaceId = request.workspaceContext!.workspaceId;
-    const userId = request.workspaceContext!.userId;
-    await campaignService.deleteCampaign(request.params.id, workspaceId, userId);
+  fastify.delete<{ Params: { id: string } }>(
+    '/:id',
+    { preHandler: [requireRole(['OWNER', 'ADMIN'])] },
+    async (request, reply) => {
+      const workspaceId = request.workspaceContext!.workspaceId;
+      const userId = request.workspaceContext!.userId;
+      await campaignService.deleteCampaign(request.params.id, workspaceId, userId);
 
-    return reply.status(200).send({
-      success: true,
-      message: 'Campaign deleted successfully',
-    });
-  });
+      return reply.status(200).send({
+        success: true,
+        message: 'Campaign deleted successfully',
+      });
+    }
+  );
+
+  // 6. POST /api/v1/campaigns/:id/launch
+  fastify.post<{ Params: { id: string } }>(
+    '/:id/launch',
+    { preHandler: [requireRole(['OWNER', 'ADMIN'])] },
+    async (request, reply) => {
+      const workspaceId = request.workspaceContext!.workspaceId;
+      const userId = request.workspaceContext!.userId;
+      const campaign = await campaignService.launchCampaign(request.params.id, workspaceId, userId);
+
+      return reply.status(200).send({
+        success: true,
+        campaign,
+      });
+    }
+  );
+
+  // 7. POST /api/v1/campaigns/:id/pause
+  fastify.post<{ Params: { id: string } }>(
+    '/:id/pause',
+    { preHandler: [requireRole(['OWNER', 'ADMIN'])] },
+    async (request, reply) => {
+      const workspaceId = request.workspaceContext!.workspaceId;
+      const userId = request.workspaceContext!.userId;
+      const campaign = await campaignService.pauseCampaign(request.params.id, workspaceId, userId);
+
+      return reply.status(200).send({
+        success: true,
+        campaign,
+      });
+    }
+  );
+
+  // 8. POST /api/v1/campaigns/:id/complete
+  fastify.post<{ Params: { id: string } }>(
+    '/:id/complete',
+    { preHandler: [requireRole(['OWNER', 'ADMIN'])] },
+    async (request, reply) => {
+      const workspaceId = request.workspaceContext!.workspaceId;
+      const userId = request.workspaceContext!.userId;
+      const campaign = await campaignService.completeCampaign(request.params.id, workspaceId, userId);
+
+      return reply.status(200).send({
+        success: true,
+        campaign,
+      });
+    }
+  );
 };

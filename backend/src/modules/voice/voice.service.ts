@@ -6,6 +6,7 @@ import {
   auditRepository,
   crmActivityRepository,
   notificationRepository,
+  settingsRepository,
   type CreateVoiceCampaignInput,
   type CreateVoiceAgentConfigInput,
   type ListCallsFilter,
@@ -21,6 +22,8 @@ import { providerRegistry } from '../../integrations/core/provider.registry.js';
 import type { VoiceProviderAdapter } from '../../integrations/calling/index.js';
 import { followUpService } from '../follow-ups/follow-up.service.js';
 import { callingPolicyService } from './calling-policy.service.js';
+import { phoneNumbersService } from './phone-numbers.service.js';
+import { voiceWebhookService } from './voice-webhook.service.js';
 import type {
   Call,
   CallStatus,
@@ -528,6 +531,11 @@ export class VoiceService {
     // Enforce Global & Workspace Kill Switch immediately prior to dispatch
     const isGlobalKillSwitchActive = callingPolicyService.isGlobalKillSwitchActive();
     const isWorkspaceKillSwitchActive = !callingPolicy.isActive;
+
+    // Check workspace-level settings kill-switch and fail-closed state
+    const workspaceSettings = await settingsRepository.getWorkspaceSettings(workspaceId);
+    const isSettingsKillSwitchActive = workspaceSettings.killSwitchActive;
+
     if (isGlobalKillSwitchActive) {
       await auditRepository.create({
         workspaceId,
@@ -539,16 +547,19 @@ export class VoiceService {
       }).catch(() => {});
       throw new KillSwitchActiveError('Global Outreach Kill Switch is active. Telephony dispatch blocked.');
     }
-    if (isWorkspaceKillSwitchActive) {
+    if (isWorkspaceKillSwitchActive || isSettingsKillSwitchActive) {
+      const reason = isSettingsKillSwitchActive
+        ? `Workspace Settings Kill Switch is active for workspace ${workspaceId}. Telephony dispatch blocked.`
+        : `Emergency Kill Switch is active for workspace ${workspaceId}. Telephony dispatch blocked.`;
       await auditRepository.create({
         workspaceId,
         userId: call.approvedByUserId || undefined,
         eventType: 'CALL_BLOCKED',
         entityType: 'Call',
         entityId: id,
-        metadata: { reason: 'Workspace Emergency Kill Switch is active' },
+        metadata: { reason },
       }).catch(() => {});
-      throw new KillSwitchActiveError(`Emergency Kill Switch is active for workspace ${workspaceId}. Telephony dispatch blocked.`);
+      throw new KillSwitchActiveError(reason);
     }
 
     // Concurrency lock to prevent duplicate dial-out to the same recipient handset simultaneously
@@ -562,6 +573,24 @@ export class VoiceService {
 
     try {
       assertValidCallTransition(call.status, 'INITIATING');
+
+      // Verify assigned caller ID phone number hydration & capability before safety checks
+      if (call.agentConfig?.assignedPhoneNumberId) {
+        const callerLine = await phoneNumbersService.getPhoneNumber(
+          workspaceId,
+          call.agentConfig.assignedPhoneNumberId
+        );
+        if (!callerLine) {
+          throw new BadRequestError(
+            `Caller ID phone number '${call.agentConfig.assignedPhoneNumberId}' is not hydrated or verified in workspace ${workspaceId}. Outbound dispatch blocked for safety.`
+          );
+        }
+        if (callerLine.status !== 'ACTIVE' || !callerLine.capabilities?.voice) {
+          throw new BadRequestError(
+            `Caller ID phone number '${callerLine.phoneNumber}' is inactive or lacks verified voice capability. Outbound dispatch blocked.`
+          );
+        }
+      }
 
       // Run Pre-Dispatch Safety Check (All 18 Gates)
       const safetyCheck = await voiceSafetyEvaluator.evaluate({
@@ -614,6 +643,11 @@ export class VoiceService {
           'Outbound telephony provider is not configured. Outbound voice calling is disabled for safety.'
         );
       }
+
+      // Atomically transition call status from APPROVED to INITIATING in PostgreSQL before external dispatch
+      await voiceRepository.updateCallStatus(id, workspaceId, 'INITIATING', {
+        initiatedAt: new Date(),
+      });
 
       const attemptNumber = (call.attempts?.length || 0) + 1;
       const attempt = await voiceRepository.createAttempt(call.id, {
@@ -741,6 +775,16 @@ export class VoiceService {
     }
 
     const normalized = telephonyAdapter.normalizeEvent(rawPayload);
+
+    // Replay protection check for Twilio webhooks
+    if (provider.toLowerCase() === 'twilio') {
+      const eventNonce = (normalized.metadata as any)?.CallSid || normalized.providerCallId;
+      const eventTimestamp = (normalized.metadata as any)?.Timestamp;
+      if (eventNonce && !voiceWebhookService.checkReplayProtection(eventNonce, eventTimestamp)) {
+        return { processed: false, event: null };
+      }
+    }
+
     const prisma = databaseClient.getPrismaClient();
 
     const call = await prisma.call.findFirst({
@@ -758,6 +802,9 @@ export class VoiceService {
       await voiceRepository.updateCallStatus(call.id, call.workspaceId, normalized.status, {
         durationSeconds: normalized.durationSeconds ?? call.durationSeconds,
         completedAt: isTerminalCallStatus(normalized.status) ? new Date() : undefined,
+        recordingUrl: (normalized.metadata as any)?.RecordingUrl ?? (normalized.metadata as any)?.recordingUrl ?? call.recordingUrl,
+        recordingDuration: normalized.durationSeconds ?? call.recordingDuration,
+        recordingChannels: 1,
       });
     }
 

@@ -2,11 +2,15 @@ import {
   WorkspaceRepository,
   SuppressionRepository,
   AuditRepository,
+  SettingsRepository,
   workspaceRepository as defaultWorkspaceRepo,
   suppressionRepository as defaultSuppressionRepo,
   auditRepository as defaultAuditRepo,
+  settingsRepository as defaultSettingsRepo,
   type PaginationResult,
+  type AuditLogQueryFilter,
 } from '../../database/repository.js';
+import type { AuditLog } from '@prisma/client';
 import { NotFoundError, BadRequestError } from '../../core/errors/api-error.js';
 import type {
   UpdateWorkspaceSettingsBody,
@@ -22,22 +26,16 @@ import type {
 } from './settings.types.js';
 
 export class SettingsService {
-  // In-memory preferences store keyed by `${workspaceId}:${userId}`
-  private userPreferencesStore: Map<string, UserPreferences> = new Map();
-  // In-memory workspace settings store for safety thresholds and kill switch state
-  private workspaceConfigStore: Map<
-    string,
-    { killSwitchActive: boolean; defaultDailyCap: number; safetyThreshold: number }
-  > = new Map();
-
   constructor(
     private workspaceRepo: WorkspaceRepository = defaultWorkspaceRepo,
     private suppressionRepo: SuppressionRepository = defaultSuppressionRepo,
-    private auditLogger: AuditRepository = defaultAuditRepo
+    private auditLogger: AuditRepository = defaultAuditRepo,
+    private settingsRepo: SettingsRepository = defaultSettingsRepo
   ) {}
 
   /**
    * Retrieves workspace settings and safety parameters.
+   * Persisted in PostgreSQL and hydrated across container restarts.
    */
   async getWorkspaceSettings(workspaceId: string): Promise<WorkspaceSettings> {
     const workspace = await this.workspaceRepo.findById(workspaceId);
@@ -45,11 +43,7 @@ export class SettingsService {
       throw new NotFoundError('Workspace not found or access denied');
     }
 
-    const config = this.workspaceConfigStore.get(workspaceId) || {
-      killSwitchActive: false,
-      defaultDailyCap: 50,
-      safetyThreshold: 70,
-    };
+    const config = await this.settingsRepo.getWorkspaceSettings(workspaceId);
 
     return {
       id: workspace.id,
@@ -65,6 +59,7 @@ export class SettingsService {
 
   /**
    * Updates workspace settings (name, kill switch, daily caps, safety thresholds).
+   * Persisted directly to PostgreSQL.
    */
   async updateWorkspaceSettings(
     workspaceId: string,
@@ -83,18 +78,11 @@ export class SettingsService {
       });
     }
 
-    const currentConfig = this.workspaceConfigStore.get(workspaceId) || {
-      killSwitchActive: false,
-      defaultDailyCap: 50,
-      safetyThreshold: 70,
-    };
-
-    const newConfig = {
-      killSwitchActive: body.killSwitchActive ?? currentConfig.killSwitchActive,
-      defaultDailyCap: body.defaultDailyCap ?? currentConfig.defaultDailyCap,
-      safetyThreshold: body.safetyThreshold ?? currentConfig.safetyThreshold,
-    };
-    this.workspaceConfigStore.set(workspaceId, newConfig);
+    const updatedConfig = await this.settingsRepo.updateWorkspaceSettings(workspaceId, {
+      killSwitchActive: body.killSwitchActive,
+      defaultDailyCap: body.defaultDailyCap,
+      safetyThreshold: body.safetyThreshold,
+    });
 
     try {
       await this.auditLogger.create({
@@ -105,7 +93,7 @@ export class SettingsService {
         entityId: workspaceId,
         metadata: {
           updatedFields: Object.keys(body),
-          config: newConfig,
+          config: updatedConfig,
         },
       });
     } catch {
@@ -116,9 +104,9 @@ export class SettingsService {
       id: updated.id,
       name: updated.name,
       slug: updated.slug,
-      killSwitchActive: newConfig.killSwitchActive,
-      defaultDailyCap: newConfig.defaultDailyCap,
-      safetyThreshold: newConfig.safetyThreshold,
+      killSwitchActive: updatedConfig.killSwitchActive,
+      defaultDailyCap: updatedConfig.defaultDailyCap,
+      safetyThreshold: updatedConfig.safetyThreshold,
       createdAt: updated.createdAt,
       updatedAt: updated.updatedAt,
     };
@@ -126,54 +114,40 @@ export class SettingsService {
 
   /**
    * Retrieves preferences for the authenticated user within the workspace.
+   * Persisted in PostgreSQL and tenant-scoped.
    */
   async getUserPreferences(userId: string, workspaceId: string): Promise<UserPreferences> {
-    const key = `${workspaceId}:${userId}`;
-    const existing = this.userPreferencesStore.get(key);
+    const record = await this.settingsRepo.getUserPreferences(userId, workspaceId);
 
-    if (existing) {
-      return existing;
-    }
-
-    const defaultPrefs: UserPreferences = {
-      userId,
-      workspaceId,
-      emailNotifications: true,
-      qualificationAlerts: true,
-      outreachApprovalAlerts: true,
-      taskDueAlerts: true,
-      theme: 'system',
-      language: 'en',
-      updatedAt: new Date(),
+    return {
+      userId: record.userId,
+      workspaceId: record.workspaceId,
+      emailNotifications: record.emailNotifications,
+      qualificationAlerts: record.qualificationAlerts,
+      outreachApprovalAlerts: record.outreachApprovalAlerts,
+      taskDueAlerts: record.taskDueAlerts,
+      theme: record.theme,
+      language: record.language,
+      updatedAt: record.updatedAt,
     };
-
-    this.userPreferencesStore.set(key, defaultPrefs);
-    return defaultPrefs;
   }
 
   /**
-   * Updates user preferences with tenant scoping.
+   * Updates user preferences with tenant scoping in PostgreSQL.
    */
   async updateUserPreferences(
     userId: string,
     workspaceId: string,
     body: UpdateUserPreferencesBody
   ): Promise<UserPreferences> {
-    const current = await this.getUserPreferences(userId, workspaceId);
-
-    const updated: UserPreferences = {
-      ...current,
-      emailNotifications: body.emailNotifications ?? current.emailNotifications,
-      qualificationAlerts: body.qualificationAlerts ?? current.qualificationAlerts,
-      outreachApprovalAlerts: body.outreachApprovalAlerts ?? current.outreachApprovalAlerts,
-      taskDueAlerts: body.taskDueAlerts ?? current.taskDueAlerts,
-      theme: body.theme ?? current.theme,
-      language: body.language ?? current.language,
-      updatedAt: new Date(),
-    };
-
-    const key = `${workspaceId}:${userId}`;
-    this.userPreferencesStore.set(key, updated);
+    const updated = await this.settingsRepo.updateUserPreferences(userId, workspaceId, {
+      emailNotifications: body.emailNotifications,
+      qualificationAlerts: body.qualificationAlerts,
+      outreachApprovalAlerts: body.outreachApprovalAlerts,
+      taskDueAlerts: body.taskDueAlerts,
+      theme: body.theme,
+      language: body.language,
+    });
 
     try {
       await this.auditLogger.create({
@@ -190,7 +164,17 @@ export class SettingsService {
       // Non-blocking audit
     }
 
-    return updated;
+    return {
+      userId: updated.userId,
+      workspaceId: updated.workspaceId,
+      emailNotifications: updated.emailNotifications,
+      qualificationAlerts: updated.qualificationAlerts,
+      outreachApprovalAlerts: updated.outreachApprovalAlerts,
+      taskDueAlerts: updated.taskDueAlerts,
+      theme: updated.theme,
+      language: updated.language,
+      updatedAt: updated.updatedAt,
+    };
   }
 
   /**
@@ -374,6 +358,16 @@ export class SettingsService {
     }
 
     return true;
+  }
+
+  /**
+   * Retrieves paginated back-office audit logs scoped to workspace.
+   */
+  async listAuditLogs(
+    workspaceId: string,
+    query: AuditLogQueryFilter = {}
+  ): Promise<PaginationResult<AuditLog>> {
+    return this.auditLogger.findManyPaginated(workspaceId, query);
   }
 }
 

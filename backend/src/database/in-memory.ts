@@ -30,6 +30,7 @@ class InMemoryDatabaseStore {
   public tasks = new Map<string, any>();
   public suppressions = new Map<string, any>();
   public settings = new Map<string, any>();
+  public userPreferences = new Map<string, any>();
   public auditLogs: any[] = [];
   public jobs = new Map<string, any>();
   public integrationEvents = new Map<string, any>();
@@ -43,6 +44,10 @@ class InMemoryDatabaseStore {
   public callOutcomes = new Map<string, any>();
   public n8nIntegrations = new Map<string, any>();
   public n8nWebhookDeliveries = new Map<string, any>();
+  public workspaceProviderCredentials = new Map<string, any>();
+  public telephonyPhoneNumbers = new Map<string, any>();
+  public passwordResetTokens = new Map<string, any>();
+  public appointments = new Map<string, any>();
 }
 
 export const inMemoryStore = new InMemoryDatabaseStore();
@@ -202,7 +207,24 @@ export function createInMemoryPrismaClient(): PrismaClient {
       },
       findMany: async ({ where }: any = {}) => {
         return Array.from(store.leads.values())
-          .filter((l) => !where?.workspaceId || l.workspaceId === where.workspaceId)
+          .filter((l) => {
+            if (where?.workspaceId && l.workspaceId !== where.workspaceId) return false;
+            if (where?.status && l.status !== where.status) return false;
+            if (where?.campaignId && l.campaignId !== where.campaignId) return false;
+            if (where?.domain) {
+              if (typeof where.domain === 'string' && l.domain !== where.domain) return false;
+              if (where.domain.equals && l.domain?.toLowerCase() !== where.domain.equals.toLowerCase()) return false;
+            }
+            if (where?.phone) {
+              if (where.phone.not === null && !l.phone) return false;
+              if (typeof where.phone === 'string' && l.phone !== where.phone) return false;
+            }
+            if (where?.address) {
+              if (where.address.not === null && !l.address) return false;
+              if (typeof where.address === 'string' && l.address !== where.address) return false;
+            }
+            return true;
+          })
           .map((l) => ({
             ...l,
             contacts: Array.from(store.contacts.values()).filter((c) => c.leadId === l.id),
@@ -224,6 +246,11 @@ export function createInMemoryPrismaClient(): PrismaClient {
           phone: data.phone || null,
           address: data.address || null,
           status: data.status || 'NEW',
+          practiceType: data.practiceType || null,
+          chairCount: data.chairCount ?? null,
+          doctorCount: data.doctorCount ?? null,
+          googleRating: data.googleRating != null ? data.googleRating : null,
+          googleReviewCount: data.googleReviewCount ?? null,
           createdAt: new Date(),
           updatedAt: new Date(),
         };
@@ -233,7 +260,16 @@ export function createInMemoryPrismaClient(): PrismaClient {
       update: async ({ where, data }: any) => {
         const lead = store.leads.get(where.id);
         if (!lead) throw new Error('Lead not found');
-        const updated = { ...lead, ...data, updatedAt: new Date() };
+        const updated = {
+          ...lead,
+          ...data,
+          practiceType: data.practiceType !== undefined ? data.practiceType : lead.practiceType,
+          chairCount: data.chairCount !== undefined ? data.chairCount : lead.chairCount,
+          doctorCount: data.doctorCount !== undefined ? data.doctorCount : lead.doctorCount,
+          googleRating: data.googleRating !== undefined ? data.googleRating : lead.googleRating,
+          googleReviewCount: data.googleReviewCount !== undefined ? data.googleReviewCount : lead.googleReviewCount,
+          updatedAt: new Date(),
+        };
         store.leads.set(where.id, updated);
         const contacts = Array.from(store.contacts.values()).filter((c) => c.leadId === updated.id);
         return { ...updated, contacts };
@@ -372,6 +408,19 @@ export function createInMemoryPrismaClient(): PrismaClient {
           contact: contact ? { ...contact, lead } : null,
         };
       },
+      updateMany: async ({ where, data }: any) => {
+        let count = 0;
+        for (const [id, msg] of store.emailMessages.entries()) {
+          const matchId = !where?.id || msg.id === where.id;
+          const matchStatus = !where?.status || msg.status === where.status;
+          const matchApproved = where?.isApproved === undefined || msg.isApproved === where.isApproved;
+          if (matchId && matchStatus && matchApproved) {
+            store.emailMessages.set(id, { ...msg, ...data, updatedAt: new Date() });
+            count++;
+          }
+        }
+        return { count };
+      },
     },
 
     websiteAudit: {
@@ -467,6 +516,8 @@ export function createInMemoryPrismaClient(): PrismaClient {
           workspaceId: create.workspaceId,
           dailyEmailCap: update?.dailyEmailCap ?? create.dailyEmailCap ?? 50,
           killSwitchActive: update?.killSwitchActive ?? create.killSwitchActive ?? false,
+          defaultDailyCap: update?.defaultDailyCap ?? update?.dailyEmailCap ?? create.defaultDailyCap ?? create.dailyEmailCap ?? 50,
+          safetyThreshold: update?.safetyThreshold ?? create.safetyThreshold ?? 70,
           requireHumanApproval: update?.requireHumanApproval ?? create.requireHumanApproval ?? true,
           antiHallucinationEnforced: update?.antiHallucinationEnforced ?? create.antiHallucinationEnforced ?? true,
           autoSuppressionOnOptOut: update?.autoSuppressionOnOptOut ?? create.autoSuppressionOnOptOut ?? true,
@@ -476,6 +527,79 @@ export function createInMemoryPrismaClient(): PrismaClient {
         };
         store.settings.set(create.workspaceId, setting);
         return setting;
+      },
+    },
+
+    workspaceSetting: {
+      findFirst: async ({ where }: any) => {
+        for (const s of store.settings.values()) {
+          if (where.workspaceId && s.workspaceId === where.workspaceId) return s;
+        }
+        return null;
+      },
+      findUnique: async ({ where }: any) => {
+        for (const s of store.settings.values()) {
+          if (where.workspaceId && s.workspaceId === where.workspaceId) return s;
+        }
+        return null;
+      },
+      upsert: async ({ create, update, where }: any) => {
+        const workspaceId = where?.workspaceId || create?.workspaceId;
+        const id = crypto.randomUUID();
+        const existing = store.settings.get(workspaceId);
+        const setting = {
+          id: existing ? existing.id : id,
+          workspaceId,
+          dailyEmailCap: update?.dailyEmailCap ?? create?.dailyEmailCap ?? 50,
+          killSwitchActive: update?.killSwitchActive ?? create?.killSwitchActive ?? false,
+          defaultDailyCap: update?.defaultDailyCap ?? update?.dailyEmailCap ?? create?.defaultDailyCap ?? create?.dailyEmailCap ?? 50,
+          safetyThreshold: update?.safetyThreshold ?? create?.safetyThreshold ?? 70,
+          requireHumanApproval: update?.requireHumanApproval ?? create?.requireHumanApproval ?? true,
+          antiHallucinationEnforced: update?.antiHallucinationEnforced ?? create?.antiHallucinationEnforced ?? true,
+          autoSuppressionOnOptOut: update?.autoSuppressionOnOptOut ?? create?.autoSuppressionOnOptOut ?? true,
+          autoSuppressionOnHardBounce: update?.autoSuppressionOnHardBounce ?? create?.autoSuppressionOnHardBounce ?? true,
+          createdAt: existing ? existing.createdAt : new Date(),
+          updatedAt: new Date(),
+        };
+        store.settings.set(workspaceId, setting);
+        return setting;
+      },
+    },
+
+    userPreference: {
+      findFirst: async ({ where }: any) => {
+        const workspaceId = where?.workspaceId || where?.workspaceId_userId?.workspaceId;
+        const userId = where?.userId || where?.workspaceId_userId?.userId;
+        const key = `${workspaceId}:${userId}`;
+        return store.userPreferences.get(key) || null;
+      },
+      findUnique: async ({ where }: any) => {
+        const workspaceId = where?.workspaceId || where?.workspaceId_userId?.workspaceId;
+        const userId = where?.userId || where?.workspaceId_userId?.userId;
+        const key = `${workspaceId}:${userId}`;
+        return store.userPreferences.get(key) || null;
+      },
+      upsert: async ({ create, update, where }: any) => {
+        const workspaceId = where?.workspaceId_userId?.workspaceId || where?.workspaceId || create?.workspaceId;
+        const userId = where?.workspaceId_userId?.userId || where?.userId || create?.userId;
+        const key = `${workspaceId}:${userId}`;
+        const existing = store.userPreferences.get(key);
+        const id = existing ? existing.id : crypto.randomUUID();
+        const pref = {
+          id,
+          userId,
+          workspaceId,
+          emailNotifications: update?.emailNotifications ?? create?.emailNotifications ?? true,
+          qualificationAlerts: update?.qualificationAlerts ?? create?.qualificationAlerts ?? true,
+          outreachApprovalAlerts: update?.outreachApprovalAlerts ?? create?.outreachApprovalAlerts ?? true,
+          taskDueAlerts: update?.taskDueAlerts ?? create?.taskDueAlerts ?? true,
+          theme: update?.theme ?? create?.theme ?? 'system',
+          language: update?.language ?? create?.language ?? 'en',
+          createdAt: existing ? existing.createdAt : new Date(),
+          updatedAt: new Date(),
+        };
+        store.userPreferences.set(key, pref);
+        return pref;
       },
     },
 
@@ -499,6 +623,41 @@ export function createInMemoryPrismaClient(): PrismaClient {
     },
 
     auditLog: {
+      count: async ({ where }: any = {}) => {
+        return store.auditLogs.filter((log: any) => {
+          if (where?.workspaceId && log.workspaceId !== where.workspaceId) return false;
+          if (where?.eventType && log.eventType !== where.eventType) return false;
+          if (where?.entityType && log.entityType !== where.entityType) return false;
+          if (where?.entityId && log.entityId !== where.entityId) return false;
+          if (where?.userId && log.userId !== where.userId) return false;
+          if (where?.createdAt?.gte && new Date(log.createdAt) < new Date(where.createdAt.gte)) return false;
+          if (where?.createdAt?.lte && new Date(log.createdAt) > new Date(where.createdAt.lte)) return false;
+          return true;
+        }).length;
+      },
+      findMany: async ({ where, orderBy, skip, take }: any = {}) => {
+        let results = store.auditLogs.filter((log: any) => {
+          if (where?.workspaceId && log.workspaceId !== where.workspaceId) return false;
+          if (where?.eventType && log.eventType !== where.eventType) return false;
+          if (where?.entityType && log.entityType !== where.entityType) return false;
+          if (where?.entityId && log.entityId !== where.entityId) return false;
+          if (where?.userId && log.userId !== where.userId) return false;
+          if (where?.createdAt?.gte && new Date(log.createdAt) < new Date(where.createdAt.gte)) return false;
+          if (where?.createdAt?.lte && new Date(log.createdAt) > new Date(where.createdAt.lte)) return false;
+          return true;
+        });
+        if (orderBy?.createdAt === 'desc') {
+          results = results.slice().sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        } else if (orderBy?.createdAt === 'asc') {
+          results = results.slice().sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+        }
+        if (skip !== undefined && take !== undefined) {
+          results = results.slice(skip, skip + take);
+        } else if (take !== undefined) {
+          results = results.slice(0, take);
+        }
+        return results;
+      },
       create: async ({ data }: any) => {
         const log = {
           id: crypto.randomUUID(),
@@ -533,8 +692,46 @@ export function createInMemoryPrismaClient(): PrismaClient {
 
     voiceAgentConfig: {
       create: async ({ data }: any) => {
-        const record = { id: crypto.randomUUID(), ...data, createdAt: new Date(), updatedAt: new Date() };
-        store.voiceAgentConfigs.set(record.id, record);
+        const id = crypto.randomUUID();
+        const record = {
+          id,
+          workspaceId: data.workspaceId,
+          name: data.name,
+          callObjective: data.callObjective,
+          openingScript: data.openingScript,
+          qualificationQuestions: data.qualificationQuestions || [],
+          approvedTalkingPoints: data.approvedTalkingPoints || [],
+          objectionHandling: data.objectionHandling || null,
+          prohibitedClaims: data.prohibitedClaims || [],
+          escalationConditions: data.escalationConditions || [],
+          fallbackBehavior: data.fallbackBehavior || 'Politely offer human callback',
+          maxDurationSeconds: data.maxDurationSeconds ?? 300,
+
+          // First-class columns
+          provider: data.provider || 'mock',
+          status: data.status || 'DRAFT',
+          modelId: data.modelId || null,
+          voiceId: data.voiceId || null,
+          voiceProvider: data.voiceProvider || null,
+          temperature: data.temperature ?? null,
+          maxTokens: data.maxTokens ?? null,
+          voiceSpeed: data.voiceSpeed ?? null,
+          voicePitch: data.voicePitch ?? null,
+          voiceStability: data.voiceStability ?? null,
+          agentPersona: data.agentPersona || null,
+          speakingStyle: data.speakingStyle || null,
+          knowledgePoints: data.knowledgePoints || [],
+          objectionRules: data.objectionRules || null,
+          structuredQuestions: data.structuredQuestions || null,
+          assignedPhoneNumberId: data.assignedPhoneNumberId || null,
+          safetyGuardrails: data.safetyGuardrails || null,
+          inboundEnabled: data.inboundEnabled ?? false,
+          outboundEnabled: data.outboundEnabled ?? true,
+
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        store.voiceAgentConfigs.set(id, record);
         return record;
       },
       findFirst: async ({ where }: any) => {
@@ -546,6 +743,22 @@ export function createInMemoryPrismaClient(): PrismaClient {
         return Array.from(store.voiceAgentConfigs.values()).filter(
           (ac) => !where?.workspaceId || ac.workspaceId === where.workspaceId
         );
+      },
+      update: async ({ where, data }: any) => {
+        const existing = store.voiceAgentConfigs.get(where.id);
+        if (!existing) throw new Error('VoiceAgentConfig not found');
+        const updated = { ...existing, ...data, updatedAt: new Date() };
+        store.voiceAgentConfigs.set(where.id, updated);
+        return updated;
+      },
+      delete: async ({ where }: any) => {
+        const id = where.id;
+        if (id && store.voiceAgentConfigs.has(id)) {
+          const record = store.voiceAgentConfigs.get(id);
+          store.voiceAgentConfigs.delete(id);
+          return record;
+        }
+        return null;
       },
     },
 
@@ -588,6 +801,9 @@ export function createInMemoryPrismaClient(): PrismaClient {
           isApproved: data.isApproved ?? false,
           approvedByUserId: data.approvedByUserId || null,
           approvedAt: data.approvedAt || null,
+          recordingUrl: data.recordingUrl || null,
+          recordingDuration: data.recordingDuration || null,
+          recordingChannels: data.recordingChannels || null,
           dispatchedAt: null,
           startedAt: null,
           endedAt: null,
@@ -701,6 +917,126 @@ export function createInMemoryPrismaClient(): PrismaClient {
       },
     },
 
+    callAttempt: {
+      count: async ({ where }: any = {}) => {
+        let count = 0;
+        for (const a of store.callAttempts.values()) {
+          if (where?.call?.workspaceId) {
+            const call = store.calls.get(a.callId);
+            if (!call || call.workspaceId !== where.call.workspaceId) continue;
+            if (where.call.leadId && call.leadId !== where.call.leadId) continue;
+            if (where.call.contactId && call.contactId !== where.call.contactId) continue;
+          }
+          if (where?.callId && a.callId !== where.callId) continue;
+          count++;
+        }
+        return count;
+      },
+      create: async ({ data }: any) => {
+        const id = crypto.randomUUID();
+        const record = {
+          id,
+          callId: data.callId,
+          attemptNumber: data.attemptNumber,
+          providerCallId: data.providerCallId || null,
+          status: data.status || 'INITIATING',
+          durationSeconds: data.durationSeconds ?? null,
+          failureReason: data.failureReason || null,
+          isRetryable: data.isRetryable ?? false,
+          startedAt: new Date(),
+          endedAt: null,
+          createdAt: new Date(),
+        };
+        store.callAttempts.set(id, record);
+        return record;
+      },
+      update: async ({ where, data }: any) => {
+        const existing = store.callAttempts.get(where.id);
+        if (!existing) throw new Error('CallAttempt not found');
+        const updated = { ...existing, ...data };
+        store.callAttempts.set(where.id, updated);
+        return updated;
+      },
+    },
+
+    callEvent: {
+      create: async ({ data }: any) => {
+        const id = crypto.randomUUID();
+        const record = {
+          id,
+          callId: data.callId,
+          eventType: data.eventType,
+          eventPayload: data.eventPayload ?? data.payload ?? null,
+          occurredAt: new Date(),
+        };
+        store.callEvents.set(id, record);
+        return record;
+      },
+      findMany: async ({ where, orderBy }: any = {}) => {
+        let results = Array.from(store.callEvents.values()).filter(
+          (e) => !where?.callId || e.callId === where.callId
+        );
+        if (orderBy?.occurredAt === 'asc') {
+          results.sort((a, b) => new Date(a.occurredAt).getTime() - new Date(b.occurredAt).getTime());
+        } else if (orderBy?.occurredAt === 'desc') {
+          results.sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime());
+        }
+        return results;
+      },
+    },
+
+    callTranscript: {
+      create: async ({ data }: any) => {
+        const id = crypto.randomUUID();
+        const record = {
+          id,
+          callId: data.callId,
+          turnIndex: data.turnIndex,
+          speaker: data.speaker,
+          text: data.text,
+          confidence: data.confidence ?? null,
+          timestampMs: data.timestampMs ?? null,
+          createdAt: new Date(),
+        };
+        store.callTranscripts.set(id, record);
+        return record;
+      },
+      findMany: async ({ where, orderBy }: any = {}) => {
+        let results = Array.from(store.callTranscripts.values()).filter(
+          (t) => !where?.callId || t.callId === where.callId
+        );
+        if (orderBy?.turnIndex === 'asc') {
+          results.sort((a, b) => a.turnIndex - b.turnIndex);
+        } else if (orderBy?.turnIndex === 'desc') {
+          results.sort((a, b) => b.turnIndex - a.turnIndex);
+        }
+        return results;
+      },
+    },
+
+    callOutcome: {
+      upsert: async ({ where, create, update }: any) => {
+        const existing = store.callOutcomes.get(where.callId);
+        if (existing) {
+          const updated = { ...existing, ...update, updatedAt: new Date() };
+          store.callOutcomes.set(where.callId, updated);
+          return updated;
+        }
+        const record = {
+          id: crypto.randomUUID(),
+          callId: where.callId,
+          ...create,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        store.callOutcomes.set(where.callId, record);
+        return record;
+      },
+      findUnique: async ({ where }: any) => {
+        return store.callOutcomes.get(where.callId) || null;
+      },
+    },
+
     n8nIntegration: {
       create: async ({ data }: any) => {
         const record: N8nIntegration = {
@@ -754,6 +1090,431 @@ export function createInMemoryPrismaClient(): PrismaClient {
         return Array.from(store.n8nWebhookDeliveries.values()).filter(
           (d) => !where?.workspaceId || d.workspaceId === where.workspaceId
         );
+      },
+    },
+
+    workspaceProviderCredential: {
+      findFirst: async ({ where }: any) => {
+        for (const cred of store.workspaceProviderCredentials.values()) {
+          if (where.id && cred.id !== where.id) continue;
+          if (where.workspaceId && cred.workspaceId !== where.workspaceId) continue;
+          if (where.provider && cred.provider.toUpperCase() !== where.provider.toUpperCase()) continue;
+          return cred;
+        }
+        return null;
+      },
+      findUnique: async ({ where }: any) => {
+        if (where.id) return store.workspaceProviderCredentials.get(where.id) || null;
+        const compound = where.workspaceId_provider || where.unique_workspace_provider;
+        if (compound) {
+          const { workspaceId, provider } = compound;
+          const target = `${workspaceId}:${provider.toUpperCase()}`;
+          for (const cred of store.workspaceProviderCredentials.values()) {
+            if (`${cred.workspaceId}:${cred.provider.toUpperCase()}` === target) return cred;
+          }
+        }
+        return null;
+      },
+      findMany: async ({ where }: any = {}) => {
+        return Array.from(store.workspaceProviderCredentials.values())
+          .filter((c) => !where?.workspaceId || c.workspaceId === where.workspaceId)
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      },
+      create: async ({ data }: any) => {
+        const id = crypto.randomUUID();
+        const record = {
+          id,
+          workspaceId: data.workspaceId,
+          provider: data.provider.toUpperCase(),
+          encryptedPayload: data.encryptedPayload,
+          maskedDisplay: data.maskedDisplay,
+          connectionStatus: data.connectionStatus || 'NOT_CONFIGURED',
+          accountDetails: data.accountDetails || null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        store.workspaceProviderCredentials.set(id, record);
+        return record;
+      },
+      update: async ({ where, data }: any) => {
+        let existing = where.id ? store.workspaceProviderCredentials.get(where.id) : null;
+        const compound = where.workspaceId_provider || where.unique_workspace_provider;
+        if (!existing && compound) {
+          const { workspaceId, provider } = compound;
+          for (const c of store.workspaceProviderCredentials.values()) {
+            if (c.workspaceId === workspaceId && c.provider.toUpperCase() === provider.toUpperCase()) {
+              existing = c;
+              break;
+            }
+          }
+        }
+        if (!existing) throw new Error('WorkspaceProviderCredential not found');
+        const updated = { ...existing, ...data, updatedAt: new Date() };
+        store.workspaceProviderCredentials.set(existing.id, updated);
+        return updated;
+      },
+      upsert: async ({ where, update, create }: any) => {
+        let existing = where.id ? store.workspaceProviderCredentials.get(where.id) : null;
+        const compound = where.workspaceId_provider || where.unique_workspace_provider;
+        if (!existing && compound) {
+          const { workspaceId, provider } = compound;
+          for (const c of store.workspaceProviderCredentials.values()) {
+            if (c.workspaceId === workspaceId && c.provider.toUpperCase() === provider.toUpperCase()) {
+              existing = c;
+              break;
+            }
+          }
+        }
+        if (existing) {
+          const updated = { ...existing, ...update, updatedAt: new Date() };
+          store.workspaceProviderCredentials.set(existing.id, updated);
+          return updated;
+        } else {
+          const id = crypto.randomUUID();
+          const record = {
+            id,
+            workspaceId: create.workspaceId,
+            provider: create.provider.toUpperCase(),
+            encryptedPayload: create.encryptedPayload,
+            maskedDisplay: create.maskedDisplay,
+            connectionStatus: create.connectionStatus || 'NOT_CONFIGURED',
+            accountDetails: create.accountDetails || null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+          store.workspaceProviderCredentials.set(id, record);
+          return record;
+        }
+      },
+      delete: async ({ where }: any) => {
+        const id = where.id;
+        if (id && store.workspaceProviderCredentials.has(id)) {
+          const record = store.workspaceProviderCredentials.get(id);
+          store.workspaceProviderCredentials.delete(id);
+          return record;
+        }
+        return null;
+      },
+    },
+
+    telephonyPhoneNumber: {
+      findFirst: async ({ where }: any) => {
+        for (const num of store.telephonyPhoneNumbers.values()) {
+          if (where.id && num.id !== where.id) continue;
+          if (where.workspaceId && num.workspaceId !== where.workspaceId) continue;
+          if (where.phoneNumber && num.phoneNumber !== where.phoneNumber) continue;
+          return num;
+        }
+        return null;
+      },
+      findUnique: async ({ where }: any) => {
+        if (where.id) return store.telephonyPhoneNumbers.get(where.id) || null;
+        const compound = where.workspaceId_phoneNumber || where.unique_workspace_phone_number;
+        if (compound) {
+          const { workspaceId, phoneNumber } = compound;
+          for (const num of store.telephonyPhoneNumbers.values()) {
+            if (num.workspaceId === workspaceId && num.phoneNumber === phoneNumber) return num;
+          }
+        }
+        return null;
+      },
+      findMany: async ({ where }: any = {}) => {
+        return Array.from(store.telephonyPhoneNumbers.values())
+          .filter((n) => {
+            if (where?.workspaceId && n.workspaceId !== where.workspaceId) return false;
+            if (where?.status && n.status !== where.status) return false;
+            if (where?.provider && n.provider !== where.provider) return false;
+            if (where?.assignedAgentId !== undefined && n.assignedAgentId !== where.assignedAgentId) return false;
+            return true;
+          })
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      },
+      create: async ({ data }: any) => {
+        const id = crypto.randomUUID();
+        const record = {
+          id,
+          workspaceId: data.workspaceId,
+          phoneNumber: data.phoneNumber,
+          friendlyName: data.friendlyName || null,
+          provider: data.provider || 'twilio',
+          status: data.status || 'ACTIVE',
+          capabilities: data.capabilities || {},
+          assignedAgentId: data.assignedAgentId || null,
+          inboundWebhookUrl: data.inboundWebhookUrl || null,
+          outboundCallerIdEnabled: data.outboundCallerIdEnabled ?? true,
+          purchasedWithoutAutoBuy: true,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        store.telephonyPhoneNumbers.set(id, record);
+        return record;
+      },
+      update: async ({ where, data }: any) => {
+        const num = store.telephonyPhoneNumbers.get(where.id);
+        if (!num) throw new Error('TelephonyPhoneNumber not found');
+        const updated = { ...num, ...data, updatedAt: new Date() };
+        store.telephonyPhoneNumbers.set(where.id, updated);
+        return updated;
+      },
+      upsert: async ({ where, update, create }: any) => {
+        let existing = where.id ? store.telephonyPhoneNumbers.get(where.id) : null;
+        const compound = where.workspaceId_phoneNumber || where.unique_workspace_phone_number;
+        if (!existing && compound) {
+          const { workspaceId, phoneNumber } = compound;
+          for (const n of store.telephonyPhoneNumbers.values()) {
+            if (n.workspaceId === workspaceId && n.phoneNumber === phoneNumber) {
+              existing = n;
+              break;
+            }
+          }
+        }
+        if (existing) {
+          const updated = { ...existing, ...update, updatedAt: new Date() };
+          store.telephonyPhoneNumbers.set(existing.id, updated);
+          return updated;
+        } else {
+          const id = crypto.randomUUID();
+          const record = {
+            id,
+            workspaceId: create.workspaceId,
+            phoneNumber: create.phoneNumber,
+            friendlyName: create.friendlyName || null,
+            provider: create.provider || 'twilio',
+            status: create.status || 'ACTIVE',
+            capabilities: create.capabilities || {},
+            assignedAgentId: create.assignedAgentId || null,
+            inboundWebhookUrl: create.inboundWebhookUrl || null,
+            outboundCallerIdEnabled: create.outboundCallerIdEnabled ?? true,
+            purchasedWithoutAutoBuy: true,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+          store.telephonyPhoneNumbers.set(id, record);
+          return record;
+        }
+      },
+      delete: async ({ where }: any) => {
+        const id = where.id;
+        if (id && store.telephonyPhoneNumbers.has(id)) {
+          const record = store.telephonyPhoneNumbers.get(id);
+          store.telephonyPhoneNumbers.delete(id);
+          return record;
+        }
+        return null;
+      },
+    },
+
+    passwordResetToken: {
+      findFirst: async ({ where, include }: any) => {
+        const now = new Date();
+        for (const token of store.passwordResetTokens.values()) {
+          if (where.tokenHash && token.tokenHash !== where.tokenHash) continue;
+          if (where.userId && token.userId !== where.userId) continue;
+          if (where.usedAt === null && token.usedAt !== null) continue;
+          if (where.expiresAt?.gt && new Date(token.expiresAt) <= now) continue;
+          const user = include?.user ? store.users.get(token.userId) || null : undefined;
+          return { ...token, ...(include?.user ? { user } : {}) };
+        }
+        return null;
+      },
+      findUnique: async ({ where, include }: any) => {
+        let match: any = null;
+        if (where.id) match = store.passwordResetTokens.get(where.id);
+        if (!match && where.tokenHash) {
+          for (const token of store.passwordResetTokens.values()) {
+            if (token.tokenHash === where.tokenHash) {
+              match = token;
+              break;
+            }
+          }
+        }
+        if (!match) return null;
+        const user = include?.user ? store.users.get(match.userId) || null : undefined;
+        return { ...match, ...(include?.user ? { user } : {}) };
+      },
+      create: async ({ data }: any) => {
+        const id = crypto.randomUUID();
+        const record = {
+          id,
+          userId: data.userId,
+          tokenHash: data.tokenHash,
+          expiresAt: data.expiresAt,
+          usedAt: null,
+          createdAt: new Date(),
+        };
+        store.passwordResetTokens.set(id, record);
+        return record;
+      },
+      update: async ({ where, data }: any) => {
+        const token = store.passwordResetTokens.get(where.id);
+        if (!token) throw new Error('PasswordResetToken not found');
+        const updated = { ...token, ...data };
+        store.passwordResetTokens.set(where.id, updated);
+        return updated;
+      },
+      updateMany: async ({ where, data }: any) => {
+        let count = 0;
+        for (const token of store.passwordResetTokens.values()) {
+          if (where.userId && token.userId !== where.userId) continue;
+          if (where.usedAt === null && token.usedAt !== null) continue;
+          store.passwordResetTokens.set(token.id, { ...token, ...data });
+          count++;
+        }
+        return { count };
+      },
+      delete: async ({ where }: any) => {
+        const id = where.id;
+        if (id && store.passwordResetTokens.has(id)) {
+          const record = store.passwordResetTokens.get(id);
+          store.passwordResetTokens.delete(id);
+          return record;
+        }
+        return null;
+      },
+      deleteMany: async ({ where }: any) => {
+        let count = 0;
+        const now = new Date();
+        for (const [id, token] of store.passwordResetTokens.entries()) {
+          let shouldDelete = false;
+          if (where.userId && token.userId === where.userId) shouldDelete = true;
+          if (where.OR) {
+            for (const cond of where.OR) {
+              if (cond.expiresAt?.lt && new Date(token.expiresAt) < now) shouldDelete = true;
+              if (cond.usedAt?.not !== undefined && token.usedAt !== null) shouldDelete = true;
+            }
+          }
+          if (shouldDelete) {
+            store.passwordResetTokens.delete(id);
+            count++;
+          }
+        }
+        return { count };
+      },
+    },
+
+    appointment: {
+      findFirst: async ({ where, include }: any = {}) => {
+        for (const appt of store.appointments.values()) {
+          if (where?.id && appt.id !== where.id) continue;
+          if (where?.workspaceId && appt.workspaceId !== where.workspaceId) continue;
+          if (where?.leadId && appt.leadId !== where.leadId) continue;
+          if (where?.contactId && appt.contactId !== where.contactId) continue;
+          if (where?.userId && appt.userId !== where.userId) continue;
+          if (where?.status && appt.status !== where.status) continue;
+          const contact = appt.contactId ? store.contacts.get(appt.contactId) || null : null;
+          const lead = appt.leadId ? store.leads.get(appt.leadId) || null : null;
+          return {
+            ...appt,
+            ...(include?.contact ? { contact } : {}),
+            ...(include?.lead ? { lead } : {}),
+          };
+        }
+        return null;
+      },
+      findUnique: async ({ where, include }: any = {}) => {
+        const appt = store.appointments.get(where.id);
+        if (!appt) return null;
+        const contact = appt.contactId ? store.contacts.get(appt.contactId) || null : null;
+        const lead = appt.leadId ? store.leads.get(appt.leadId) || null : null;
+        return {
+          ...appt,
+          ...(include?.contact ? { contact } : {}),
+          ...(include?.lead ? { lead } : {}),
+        };
+      },
+      findMany: async ({ where, orderBy, skip, take, include }: any = {}) => {
+        let results = Array.from(store.appointments.values()).filter((appt: any) => {
+          if (where?.workspaceId && appt.workspaceId !== where.workspaceId) return false;
+          if (where?.leadId && appt.leadId !== where.leadId) return false;
+          if (where?.contactId && appt.contactId !== where.contactId) return false;
+          if (where?.userId && appt.userId !== where.userId) return false;
+          if (where?.status && appt.status !== where.status) return false;
+          if (where?.scheduledStartTime?.gte && new Date(appt.scheduledStartTime) < new Date(where.scheduledStartTime.gte)) return false;
+          if (where?.scheduledStartTime?.lte && new Date(appt.scheduledStartTime) > new Date(where.scheduledStartTime.lte)) return false;
+          return true;
+        });
+        if (orderBy?.scheduledStartTime === 'asc') {
+          results = results.slice().sort((a: any, b: any) => new Date(a.scheduledStartTime).getTime() - new Date(b.scheduledStartTime).getTime());
+        } else if (orderBy?.scheduledStartTime === 'desc') {
+          results = results.slice().sort((a: any, b: any) => new Date(b.scheduledStartTime).getTime() - new Date(a.scheduledStartTime).getTime());
+        }
+        if (skip !== undefined && take !== undefined) {
+          results = results.slice(skip, skip + take);
+        } else if (take !== undefined) {
+          results = results.slice(0, take);
+        }
+        return results.map((appt: any) => {
+          const contact = appt.contactId ? store.contacts.get(appt.contactId) || null : null;
+          const lead = appt.leadId ? store.leads.get(appt.leadId) || null : null;
+          return {
+            ...appt,
+            ...(include?.contact ? { contact } : {}),
+            ...(include?.lead ? { lead } : {}),
+          };
+        });
+      },
+      count: async ({ where }: any = {}) => {
+        return Array.from(store.appointments.values()).filter((appt: any) => {
+          if (where?.workspaceId && appt.workspaceId !== where.workspaceId) return false;
+          if (where?.leadId && appt.leadId !== where.leadId) return false;
+          if (where?.contactId && appt.contactId !== where.contactId) return false;
+          if (where?.userId && appt.userId !== where.userId) return false;
+          if (where?.status && appt.status !== where.status) return false;
+          if (where?.scheduledStartTime?.gte && new Date(appt.scheduledStartTime) < new Date(where.scheduledStartTime.gte)) return false;
+          if (where?.scheduledStartTime?.lte && new Date(appt.scheduledStartTime) > new Date(where.scheduledStartTime.lte)) return false;
+          return true;
+        }).length;
+      },
+      create: async ({ data, include }: any) => {
+        const id = crypto.randomUUID();
+        const appt = {
+          id,
+          workspaceId: data.workspaceId,
+          leadId: data.leadId,
+          contactId: data.contactId || null,
+          userId: data.userId || null,
+          title: data.title || 'Meeting',
+          scheduledStartTime: new Date(data.scheduledStartTime),
+          scheduledEndTime: new Date(data.scheduledEndTime),
+          meetingLink: data.meetingLink || null,
+          status: data.status || 'SCHEDULED',
+          notes: data.notes || null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+        store.appointments.set(id, appt);
+        const contact = appt.contactId ? store.contacts.get(appt.contactId) || null : null;
+        const lead = appt.leadId ? store.leads.get(appt.leadId) || null : null;
+        return {
+          ...appt,
+          ...(include?.contact ? { contact } : {}),
+          ...(include?.lead ? { lead } : {}),
+        };
+      },
+      update: async ({ where, data, include }: any) => {
+        const existing = store.appointments.get(where.id);
+        if (!existing) throw new Error('Appointment not found');
+        const updated = {
+          ...existing,
+          ...data,
+          scheduledStartTime: data.scheduledStartTime ? new Date(data.scheduledStartTime) : existing.scheduledStartTime,
+          scheduledEndTime: data.scheduledEndTime ? new Date(data.scheduledEndTime) : existing.scheduledEndTime,
+          updatedAt: new Date(),
+        };
+        store.appointments.set(where.id, updated);
+        const contact = updated.contactId ? store.contacts.get(updated.contactId) || null : null;
+        const lead = updated.leadId ? store.leads.get(updated.leadId) || null : null;
+        return {
+          ...updated,
+          ...(include?.contact ? { contact } : {}),
+          ...(include?.lead ? { lead } : {}),
+        };
+      },
+      delete: async ({ where }: any) => {
+        const existing = store.appointments.get(where.id);
+        if (!existing) throw new Error('Appointment not found');
+        store.appointments.delete(where.id);
+        return existing;
       },
     },
 

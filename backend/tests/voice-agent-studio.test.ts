@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { createInMemoryPrismaClient } from '../src/database/in-memory.js';
+import { databaseClient } from '../src/database/client.js';
 import {
   voiceAgentReadinessService,
   PROVIDER_MODELS,
@@ -18,6 +20,8 @@ import type {
 } from '../src/modules/voice/voice.types.js';
 
 async function runVoiceAgentStudioTests() {
+  databaseClient.setPrismaClient(createInMemoryPrismaClient());
+  try {
   console.log('\n--- Starting closeVDS Voice Agent Studio & Lifecycle Management Tests (Milestone 4 / R4) ---');
 
   const testWorkspaceId = `ws_studio_test_${Date.now()}`;
@@ -386,6 +390,9 @@ async function runVoiceAgentStudioTests() {
   console.log('✓ Activation gate enforcement, number collision prevention, pause, and resume verified');
 
   console.log('\n--- All CloseVDS Voice Agent Studio & Lifecycle Management Tests Passed Successfully! ---');
+  } finally {
+    databaseClient.setPrismaClient(null);
+  }
 }
 
 runVoiceAgentStudioTests().catch((err) => {

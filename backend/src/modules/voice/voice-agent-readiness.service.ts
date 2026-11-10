@@ -442,6 +442,27 @@ export class VoiceAgentReadinessService {
         escalationConditions: input.escalationConditions || [],
         fallbackBehavior: input.fallbackBehavior,
         maxDurationSeconds: input.maxDurationSeconds || input.safety?.maxDurationSeconds || 300,
+
+        // First-Class schema columns
+        provider,
+        status: 'DRAFT',
+        modelId: input.modelId ?? null,
+        voiceId: input.voiceId ?? null,
+        voiceProvider: input.voiceProvider ?? null,
+        temperature: input.temperature ?? null,
+        maxTokens: input.maxTokens ?? null,
+        voiceSpeed: input.voiceSpeed ?? null,
+        voicePitch: input.voicePitch ?? null,
+        voiceStability: input.voiceStability ?? null,
+        agentPersona: input.agentPersona ?? null,
+        speakingStyle: input.speakingStyle ?? null,
+        knowledgePoints: input.knowledgePoints ?? [],
+        objectionRules: input.objectionRules ?? null,
+        structuredQuestions: input.structuredQuestions ?? null,
+        assignedPhoneNumberId: input.assignedPhoneNumberId ?? null,
+        safetyGuardrails: input.safety ?? null,
+        inboundEnabled: input.inboundEnabled ?? false,
+        outboundEnabled: input.outboundEnabled ?? true,
       });
     } catch (err: any) {
       if (err?.code === 'P2003' || err?.code === 'P2025' || process.env.NODE_ENV === 'test') {
@@ -512,6 +533,27 @@ export class VoiceAgentReadinessService {
         escalationConditions: input.escalationConditions ?? entity.escalationConditions,
         fallbackBehavior: input.fallbackBehavior ?? (entity.fallbackBehavior || undefined),
         maxDurationSeconds: input.maxDurationSeconds ?? (entity as any).maxDurationSeconds,
+
+        // First-Class schema columns
+        ...(input.provider !== undefined ? { provider: input.provider } : {}),
+        ...(input.status !== undefined ? { status: input.status } : {}),
+        ...(input.modelId !== undefined ? { modelId: input.modelId } : {}),
+        ...(input.voiceId !== undefined ? { voiceId: input.voiceId } : {}),
+        ...(input.voiceProvider !== undefined ? { voiceProvider: input.voiceProvider } : {}),
+        ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+        ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+        ...(input.voiceSpeed !== undefined ? { voiceSpeed: input.voiceSpeed } : {}),
+        ...(input.voicePitch !== undefined ? { voicePitch: input.voicePitch } : {}),
+        ...(input.voiceStability !== undefined ? { voiceStability: input.voiceStability } : {}),
+        ...(input.agentPersona !== undefined ? { agentPersona: input.agentPersona } : {}),
+        ...(input.speakingStyle !== undefined ? { speakingStyle: input.speakingStyle } : {}),
+        ...(input.knowledgePoints !== undefined ? { knowledgePoints: input.knowledgePoints } : {}),
+        ...(input.objectionRules !== undefined ? { objectionRules: input.objectionRules } : {}),
+        ...(input.structuredQuestions !== undefined ? { structuredQuestions: input.structuredQuestions } : {}),
+        ...(input.assignedPhoneNumberId !== undefined ? { assignedPhoneNumberId: input.assignedPhoneNumberId } : {}),
+        ...(input.safety !== undefined ? { safetyGuardrails: input.safety } : {}),
+        ...(input.inboundEnabled !== undefined ? { inboundEnabled: input.inboundEnabled } : {}),
+        ...(input.outboundEnabled !== undefined ? { outboundEnabled: input.outboundEnabled } : {}),
       });
     } catch (err: any) {
       if (err?.code === 'P2003' || err?.code === 'P2025' || err?.code === 'NOT_FOUND' || err?.statusCode === 404 || process.env.NODE_ENV === 'test') {

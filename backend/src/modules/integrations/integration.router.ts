@@ -8,6 +8,7 @@ import {
   requireAuthenticatedUser,
   requireWorkspaceContext,
 } from '../../core/permissions/auth-guards.js';
+import { ForbiddenError } from '../../core/errors/api-error.js';
 import type { WebhookProvider } from './integration.types.js';
 
 export const integrationRouter: FastifyPluginAsync = async (fastify): Promise<void> => {
@@ -26,7 +27,7 @@ export const integrationRouter: FastifyPluginAsync = async (fastify): Promise<vo
       if (mode === 'subscribe' && token && expectedToken && token === expectedToken) {
         return reply.status(200).send(challenge);
       }
-      return reply.status(403).send({ error: 'Webhook verification token mismatch' });
+      throw new ForbiddenError('Webhook verification token mismatch');
     }
     return reply.status(200).send({ status: 'ok', provider });
   });

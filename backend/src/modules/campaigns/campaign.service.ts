@@ -5,13 +5,44 @@ import {
   auditRepository as defaultAuditRepo,
   type PaginationResult,
 } from '../../database/repository.js';
-import { NotFoundError } from '../../core/errors/api-error.js';
+import { NotFoundError, BadRequestError } from '../../core/errors/api-error.js';
 import type {
   CreateCampaignInput,
   UpdateCampaignInput,
   CampaignQueryInput,
 } from './campaign.schema.js';
-import type { Campaign } from '@prisma/client';
+import type { Campaign, CampaignStatus } from '@prisma/client';
+
+/**
+ * Authoritative campaign lifecycle state machine validation.
+ * Supported progressions:
+ * - DRAFT -> ACTIVE (Launch)
+ * - ACTIVE -> PAUSED (Pause)
+ * - PAUSED -> ACTIVE (Resume)
+ * - ACTIVE -> COMPLETED (Complete)
+ * - PAUSED -> COMPLETED (Complete)
+ * - COMPLETED is terminal (no transitions permitted)
+ */
+export function isValidCampaignTransition(current: CampaignStatus, target: CampaignStatus): boolean {
+  if (current === target) return true;
+  if (current === 'COMPLETED') return false;
+  if (current === 'DRAFT') {
+    return target === 'ACTIVE';
+  }
+  if (current === 'ACTIVE') {
+    return target === 'PAUSED' || target === 'COMPLETED';
+  }
+  if (current === 'PAUSED') {
+    return target === 'ACTIVE' || target === 'COMPLETED';
+  }
+  return false;
+}
+
+export function assertValidCampaignTransition(current: CampaignStatus, target: CampaignStatus): void {
+  if (!isValidCampaignTransition(current, target)) {
+    throw new BadRequestError(`Invalid campaign status transition from '${current}' to '${target}'`);
+  }
+}
 
 export class CampaignService {
   constructor(
@@ -91,6 +122,11 @@ export class CampaignService {
     userId: string | undefined,
     data: UpdateCampaignInput
   ): Promise<Campaign> {
+    if (data.status) {
+      const existing = await this.getCampaign(id, workspaceId);
+      assertValidCampaignTransition(existing.status, data.status as CampaignStatus);
+    }
+
     const updated = await this.campaignRepo.update(id, workspaceId, data);
 
     try {
@@ -107,6 +143,18 @@ export class CampaignService {
     }
 
     return updated;
+  }
+
+  async launchCampaign(id: string, workspaceId: string, userId: string | undefined): Promise<Campaign> {
+    return this.updateCampaign(id, workspaceId, userId, { status: 'ACTIVE' });
+  }
+
+  async pauseCampaign(id: string, workspaceId: string, userId: string | undefined): Promise<Campaign> {
+    return this.updateCampaign(id, workspaceId, userId, { status: 'PAUSED' });
+  }
+
+  async completeCampaign(id: string, workspaceId: string, userId: string | undefined): Promise<Campaign> {
+    return this.updateCampaign(id, workspaceId, userId, { status: 'COMPLETED' });
   }
 
   /**

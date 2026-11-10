@@ -10,7 +10,7 @@ import {
   type OutreachWithRelations,
   type PaginationResult,
 } from '../../database/repository.js';
-import { NotFoundError, BadRequestError, ForbiddenError } from '../../core/errors/api-error.js';
+import { NotFoundError, BadRequestError, ForbiddenError, ConflictError } from '../../core/errors/api-error.js';
 import { assertKillSwitchNotActive } from '../../core/security/security.js';
 import { providerRegistry } from '../../integrations/core/provider.registry.js';
 import { StandardEmailAdapter } from '../../integrations/email/email.adapter.js';
@@ -490,6 +490,18 @@ export class OutreachService {
         subject: message.subject,
       },
     }).catch(() => {});
+
+    // 8.5 Atomic conditional state transition to QUEUED before provider dispatch
+    const transitioned = await this.outreachRepo.transitionToQueued(id, workspaceId);
+    if (!transitioned) {
+      const current = await this.outreachRepo.findById(id, workspaceId);
+      if (current && (current.status === 'SENT' || current.status === 'QUEUED')) {
+        return this.mapToOutreachItem(current);
+      }
+      throw new ConflictError(
+        `Outreach draft is already being dispatched or not in an approved state. Current status: ${current?.status || 'UNKNOWN'}`
+      );
+    }
 
     // 9. Provider Dispatch Boundary
     try {

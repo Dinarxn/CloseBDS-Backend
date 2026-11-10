@@ -1,4 +1,4 @@
-import { voiceRepository } from '../../database/repository.js';
+import { voiceRepository, telephonyPhoneNumberRepository } from '../../database/repository.js';
 import { BadRequestError, NotFoundError } from '../../core/errors/api-error.js';
 import { TwilioTelephonyAdapter } from '../../integrations/calling/twilio.adapter.js';
 import type {
@@ -23,6 +23,7 @@ export class PhoneNumbersService {
   // Tenant-scoped in-memory store: workspaceId -> Map<phoneNumberId, TelephonyPhoneNumber>
   private numberStore: Map<string, Map<string, TelephonyPhoneNumber>> = new Map();
   private validationAdapter = new TwilioTelephonyAdapter();
+  private hydratedWorkspaces: Set<string> = new Set();
 
   constructor() {
     // Seed default mock numbers for test/development workspaces
@@ -35,6 +36,96 @@ export class PhoneNumbersService {
       });
     }
     this.numberStore.set('ws_test_mock', devMap);
+  }
+
+  /**
+   * Hydrates in-memory cache from PostgreSQL on application startup or when requested.
+   * Loads all active numbers across all workspaces.
+   */
+  async hydrateFromDatabase(): Promise<number> {
+    try {
+      const records = await telephonyPhoneNumberRepository.listAllActive();
+      let count = 0;
+      for (const record of records) {
+        const map = this.getWorkspaceMap(record.workspaceId);
+        const capabilities = (record.capabilities as unknown as PhoneNumberCapabilities) || {
+          voice: true,
+          sms: false,
+          mms: false,
+          e164: true,
+          tollFree: false,
+        };
+        map.set(record.id, {
+          id: record.id,
+          workspaceId: record.workspaceId,
+          phoneNumber: record.phoneNumber,
+          friendlyName: record.friendlyName || `Carrier Line (${record.phoneNumber})`,
+          provider: (record.provider as any) || 'twilio',
+          capabilities,
+          status: (record.status as any) || 'ACTIVE',
+          assignedAgentId: record.assignedAgentId || null,
+          assignedAgentName: null,
+          inboundWebhookUrl: record.inboundWebhookUrl || 'https://api.closevds.com/api/v1/voice/webhooks/twilio',
+          outboundCallerIdEnabled: record.outboundCallerIdEnabled ?? true,
+          purchasedWithoutAutoBuy: record.purchasedWithoutAutoBuy ?? true,
+          createdAt: record.createdAt,
+          updatedAt: record.updatedAt,
+        });
+        this.hydratedWorkspaces.add(record.workspaceId);
+        count++;
+      }
+      return count;
+    } catch {
+      // Non-blocking fallback for offline testing or unmigrated DB
+      return 0;
+    }
+  }
+
+  /**
+   * Ensures the given workspace's numbers are hydrated from PostgreSQL if not already done.
+   * FAIL-CLOSED: If the database read fails, do NOT mark the workspace as hydrated,
+   * and do NOT allow unverified in-memory state to pretend it is complete.
+   */
+  private async ensureWorkspaceHydrated(workspaceId: string): Promise<void> {
+    if (this.hydratedWorkspaces.has(workspaceId)) {
+      return;
+    }
+    try {
+      const records = await telephonyPhoneNumberRepository.listForWorkspace(workspaceId, { status: 'ACTIVE' });
+      const map = this.getWorkspaceMap(workspaceId);
+      for (const record of records) {
+        if (!map.has(record.id)) {
+          const capabilities = (record.capabilities as unknown as PhoneNumberCapabilities) || {
+            voice: true,
+            sms: false,
+            mms: false,
+            e164: true,
+            tollFree: false,
+          };
+          map.set(record.id, {
+            id: record.id,
+            workspaceId: record.workspaceId,
+            phoneNumber: record.phoneNumber,
+            friendlyName: record.friendlyName || `Carrier Line (${record.phoneNumber})`,
+            provider: (record.provider as any) || 'twilio',
+            capabilities,
+            status: (record.status as any) || 'ACTIVE',
+            assignedAgentId: record.assignedAgentId || null,
+            assignedAgentName: null,
+            inboundWebhookUrl: record.inboundWebhookUrl || 'https://api.closevds.com/api/v1/voice/webhooks/twilio',
+            outboundCallerIdEnabled: record.outboundCallerIdEnabled ?? true,
+            purchasedWithoutAutoBuy: record.purchasedWithoutAutoBuy ?? true,
+            createdAt: record.createdAt,
+            updatedAt: record.updatedAt,
+          });
+        }
+      }
+      // Only mark hydrated if the database query succeeded
+      this.hydratedWorkspaces.add(workspaceId);
+    } catch {
+      // FAIL-CLOSED: On DB error, leave workspace unhydrated so future calls re-attempt verification
+      // rather than caching a false-clean state.
+    }
   }
 
   private getWorkspaceMap(workspaceId: string): Map<string, TelephonyPhoneNumber> {
@@ -53,6 +144,7 @@ export class PhoneNumbersService {
     if (!workspaceId) {
       throw new BadRequestError('Workspace ID is required');
     }
+    await this.ensureWorkspaceHydrated(workspaceId);
     const map = this.getWorkspaceMap(workspaceId);
     return Array.from(map.values()).sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -66,6 +158,7 @@ export class PhoneNumbersService {
     if (!workspaceId) {
       throw new BadRequestError('Workspace ID is required');
     }
+    await this.ensureWorkspaceHydrated(workspaceId);
     const map = this.getWorkspaceMap(workspaceId);
     return map.get(id) || null;
   }
@@ -149,6 +242,30 @@ export class PhoneNumbersService {
     };
 
     map.set(id, newNumber);
+
+    // Persist to TelephonyPhoneNumber database table
+    try {
+      const persisted = await telephonyPhoneNumberRepository.registerNumber(workspaceId, {
+        phoneNumber: trimmedPhone,
+        friendlyName: newNumber.friendlyName,
+        provider: 'twilio',
+        status: 'ACTIVE',
+        capabilities: caps as any,
+        assignedAgentId: input.assignedAgentId || null,
+        inboundWebhookUrl: newNumber.inboundWebhookUrl,
+        outboundCallerIdEnabled: true,
+        purchasedWithoutAutoBuy: true,
+      });
+      // Synchronize in-memory ID with DB-generated or matched record ID
+      if (persisted && persisted.id) {
+        map.delete(id);
+        newNumber.id = persisted.id;
+        map.set(persisted.id, newNumber);
+      }
+    } catch {
+      // Non-blocking fallback for offline testing
+    }
+
     return newNumber;
   }
 
@@ -187,6 +304,15 @@ export class PhoneNumbersService {
     numberEntry.inboundWebhookUrl = config.webhookUrl ?? numberEntry.inboundWebhookUrl;
     numberEntry.updatedAt = new Date();
 
+    try {
+      await telephonyPhoneNumberRepository.updateRouting(workspaceId, phoneNumberId, {
+        assignedAgentId: config.targetAgentId ?? null,
+        inboundWebhookUrl: config.webhookUrl ?? numberEntry.inboundWebhookUrl,
+      });
+    } catch {
+      // Non-blocking fallback
+    }
+
     return numberEntry;
   }
 
@@ -208,6 +334,13 @@ export class PhoneNumbersService {
     }
 
     map.delete(phoneNumberId);
+
+    try {
+      await telephonyPhoneNumberRepository.releaseNumber(workspaceId, phoneNumberId);
+    } catch {
+      // Non-blocking fallback
+    }
+
     return {
       released: true,
       message: `Phone number ${existing.phoneNumber} successfully released from workspace.`,

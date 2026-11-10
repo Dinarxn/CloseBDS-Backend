@@ -1,8 +1,19 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { authService } from './auth.service.js';
-import { registerSchema, loginSchema } from './auth.schema.js';
+import {
+  registerSchema,
+  loginSchema,
+  forgotPasswordSchema,
+  resetPasswordSchema,
+} from './auth.schema.js';
 import { requireAuthenticatedUser } from '../../core/permissions/auth-guards.js';
 import { config } from '../../config/index.js';
+
+// Dedicated Password Reset Rate Limit: 5 requests per 15 minutes per IP
+const PASSWORD_RESET_RATE_LIMIT = {
+  max: 5,
+  timeWindow: 15 * 60 * 1000,
+};
 
 export const authRouter: FastifyPluginAsync = async (fastify): Promise<void> => {
   // 1. POST /api/v1/auth/register
@@ -100,6 +111,48 @@ export const authRouter: FastifyPluginAsync = async (fastify): Promise<void> => 
       return reply.status(200).send({
         success: true,
         user,
+      });
+    }
+  );
+
+  // 5. POST /api/v1/auth/forgot-password
+  fastify.post(
+    '/forgot-password',
+    {
+      config: {
+        rateLimit: PASSWORD_RESET_RATE_LIMIT,
+      },
+    },
+    async (request, reply) => {
+      const parsedBody = forgotPasswordSchema.parse(request.body);
+      const result = await authService.requestPasswordReset(parsedBody);
+
+      return reply.status(200).send({
+        success: true,
+        message: result.message,
+        // In non-production mode, expose testToken for end-to-end integration tests
+        ...(config.NODE_ENV !== 'production' && result.rawToken
+          ? { testToken: result.rawToken }
+          : {}),
+      });
+    }
+  );
+
+  // 6. POST /api/v1/auth/reset-password
+  fastify.post(
+    '/reset-password',
+    {
+      config: {
+        rateLimit: PASSWORD_RESET_RATE_LIMIT,
+      },
+    },
+    async (request, reply) => {
+      const parsedBody = resetPasswordSchema.parse(request.body);
+      const result = await authService.resetPassword(parsedBody);
+
+      return reply.status(200).send({
+        success: true,
+        message: result.message,
       });
     }
   );

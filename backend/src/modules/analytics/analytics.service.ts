@@ -42,57 +42,6 @@ export class AnalyticsService {
   async getOverview(workspaceId: string, filter?: DateRangeFilter): Promise<OverviewMetrics> {
     const createdAt = this.buildCreatedAtFilter(filter);
 
-    const [leads, campaigns, emailMessages, crmActivities, tasks] = await Promise.all([
-      this.prisma.lead.findMany({
-        where: {
-          workspaceId,
-          ...(filter?.campaignId ? { campaignId: filter.campaignId } : {}),
-          ...(createdAt ? { createdAt } : {}),
-        },
-        select: { status: true },
-      }),
-      this.prisma.campaign.findMany({
-        where: {
-          workspaceId,
-          ...(createdAt ? { createdAt } : {}),
-        },
-        select: { status: true },
-      }),
-      this.prisma.emailMessage.findMany({
-        where: {
-          emailCampaign: {
-            campaign: {
-              workspaceId,
-              ...(filter?.campaignId ? { id: filter.campaignId } : {}),
-            },
-          },
-          ...(createdAt ? { createdAt } : {}),
-        },
-        select: { status: true, isApproved: true },
-      }),
-      this.prisma.cRMActivity.findMany({
-        where: {
-          lead: {
-            workspaceId,
-            ...(filter?.campaignId ? { campaignId: filter.campaignId } : {}),
-          },
-          ...(createdAt ? { createdAt } : {}),
-        },
-        select: { type: true },
-      }),
-      this.prisma.task.findMany({
-        where: {
-          lead: {
-            workspaceId,
-            ...(filter?.campaignId ? { campaignId: filter.campaignId } : {}),
-          },
-          ...(createdAt ? { createdAt } : {}),
-        },
-        select: { status: true },
-      }),
-    ]);
-
-    // 1. Leads breakdown
     const leadCounts: Record<CanonicalLeadStatus, number> = {
       DISCOVERED: 0,
       IMPORTED: 0,
@@ -111,13 +60,223 @@ export class AnalyticsService {
       DISQUALIFIED: 0,
       OPT_OUT: 0,
     };
-    for (const lead of leads) {
-      const s = lead.status as CanonicalLeadStatus;
-      if (leadCounts[s] !== undefined) {
-        leadCounts[s]++;
+    let totalLeads = 0;
+
+    const campaignCounts: Record<CampaignStatus, number> = {
+      DRAFT: 0,
+      ACTIVE: 0,
+      PAUSED: 0,
+      COMPLETED: 0,
+    };
+
+    let draftOutreach = 0;
+    let approvedOutreach = 0;
+    let sentOutreach = 0;
+    let rejectedOutreach = 0;
+    let failedOutreach = 0;
+    let totalOutreach = 0;
+
+    const crmCounts: Record<CRMActivityType, number> = {
+      STAGE_CHANGE: 0,
+      NOTE: 0,
+      CALL_LOG: 0,
+      EMAIL_SENT: 0,
+      EMAIL_REPLIED: 0,
+    };
+
+    const taskCounts: Record<TaskStatus, number> = {
+      PENDING: 0,
+      IN_PROGRESS: 0,
+      COMPLETED: 0,
+      CANCELLED: 0,
+    };
+
+    let useGroupBy =
+      typeof (this.prisma.lead as any)?.groupBy === 'function' &&
+      typeof (this.prisma.campaign as any)?.groupBy === 'function';
+
+    if (useGroupBy) {
+      try {
+        const [leadGroups, campGroups, emailMessages, crmActivities, tasks] = await Promise.all([
+          (this.prisma.lead as any).groupBy({
+            by: ['status'],
+            where: {
+              workspaceId,
+              ...(filter?.campaignId ? { campaignId: filter.campaignId } : {}),
+              ...(createdAt ? { createdAt } : {}),
+            },
+            _count: { id: true },
+          }),
+          (this.prisma.campaign as any).groupBy({
+            by: ['status'],
+            where: {
+              workspaceId,
+              ...(createdAt ? { createdAt } : {}),
+            },
+            _count: { id: true },
+          }),
+          this.prisma.emailMessage.findMany({
+            where: {
+              emailCampaign: {
+                campaign: {
+                  workspaceId,
+                  ...(filter?.campaignId ? { id: filter.campaignId } : {}),
+                },
+              },
+              ...(createdAt ? { createdAt } : {}),
+            },
+            select: { status: true, isApproved: true },
+          }),
+          this.prisma.cRMActivity.findMany({
+            where: {
+              lead: {
+                workspaceId,
+                ...(filter?.campaignId ? { campaignId: filter.campaignId } : {}),
+              },
+              ...(createdAt ? { createdAt } : {}),
+            },
+            select: { type: true },
+          }),
+          this.prisma.task.findMany({
+            where: {
+              lead: {
+                workspaceId,
+                ...(filter?.campaignId ? { campaignId: filter.campaignId } : {}),
+              },
+              ...(createdAt ? { createdAt } : {}),
+            },
+            select: { status: true },
+          }),
+        ]);
+
+        for (const g of leadGroups) {
+          const s = g.status as CanonicalLeadStatus;
+          if (leadCounts[s] !== undefined) {
+            leadCounts[s] = g._count.id;
+            totalLeads += g._count.id;
+          }
+        }
+
+        for (const c of campGroups) {
+          const s = c.status as CampaignStatus;
+          if (campaignCounts[s] !== undefined) {
+            campaignCounts[s] = c._count.id;
+          }
+        }
+
+        for (const msg of emailMessages) {
+          if (msg.status === 'DRAFT') draftOutreach++;
+          else if (msg.status === 'APPROVED' || msg.isApproved) approvedOutreach++;
+          else if (msg.status === 'SENT') sentOutreach++;
+          else if (msg.status === 'REJECTED') rejectedOutreach++;
+          else if (msg.status === 'FAILED') failedOutreach++;
+        }
+        totalOutreach = emailMessages.length;
+
+        for (const act of crmActivities) {
+          if (crmCounts[act.type] !== undefined) {
+            crmCounts[act.type]++;
+          }
+        }
+
+        for (const t of tasks) {
+          if (taskCounts[t.status] !== undefined) {
+            taskCounts[t.status]++;
+          }
+        }
+      } catch {
+        useGroupBy = false;
+        totalLeads = 0;
       }
     }
-    const totalLeads = leads.length;
+
+    if (!useGroupBy) {
+      const [leads, campaigns, emailMessages, crmActivities, tasks] = await Promise.all([
+        this.prisma.lead.findMany({
+          where: {
+            workspaceId,
+            ...(filter?.campaignId ? { campaignId: filter.campaignId } : {}),
+            ...(createdAt ? { createdAt } : {}),
+          },
+          select: { status: true },
+        }),
+        this.prisma.campaign.findMany({
+          where: {
+            workspaceId,
+            ...(createdAt ? { createdAt } : {}),
+          },
+          select: { status: true },
+        }),
+        this.prisma.emailMessage.findMany({
+          where: {
+            emailCampaign: {
+              campaign: {
+                workspaceId,
+                ...(filter?.campaignId ? { id: filter.campaignId } : {}),
+              },
+            },
+            ...(createdAt ? { createdAt } : {}),
+          },
+          select: { status: true, isApproved: true },
+        }),
+        this.prisma.cRMActivity.findMany({
+          where: {
+            lead: {
+              workspaceId,
+              ...(filter?.campaignId ? { campaignId: filter.campaignId } : {}),
+            },
+            ...(createdAt ? { createdAt } : {}),
+          },
+          select: { type: true },
+        }),
+        this.prisma.task.findMany({
+          where: {
+            lead: {
+              workspaceId,
+              ...(filter?.campaignId ? { campaignId: filter.campaignId } : {}),
+            },
+            ...(createdAt ? { createdAt } : {}),
+          },
+          select: { status: true },
+        }),
+      ]);
+
+      for (const lead of leads) {
+        const s = lead.status as CanonicalLeadStatus;
+        if (leadCounts[s] !== undefined) {
+          leadCounts[s]++;
+        }
+      }
+      totalLeads = leads.length;
+
+      for (const c of campaigns) {
+        if (campaignCounts[c.status] !== undefined) {
+          campaignCounts[c.status]++;
+        }
+      }
+
+      for (const msg of emailMessages) {
+        if (msg.status === 'DRAFT') draftOutreach++;
+        else if (msg.status === 'APPROVED' || msg.isApproved) approvedOutreach++;
+        else if (msg.status === 'SENT') sentOutreach++;
+        else if (msg.status === 'REJECTED') rejectedOutreach++;
+        else if (msg.status === 'FAILED') failedOutreach++;
+      }
+      totalOutreach = emailMessages.length;
+
+      for (const act of crmActivities) {
+        if (crmCounts[act.type] !== undefined) {
+          crmCounts[act.type]++;
+        }
+      }
+
+      for (const t of tasks) {
+        if (taskCounts[t.status] !== undefined) {
+          taskCounts[t.status]++;
+        }
+      }
+    }
+
     const qualifiedCount =
       leadCounts.QUALIFIED +
       leadCounts.CALL_READY +
@@ -130,66 +289,10 @@ export class AnalyticsService {
     const contactedCount = leadCounts.CONTACTED + leadCounts.REPLIED;
     const replyRate = contactedCount > 0 ? Math.round((leadCounts.REPLIED / contactedCount) * 10000) / 100 : 0;
 
-    // 2. Campaigns breakdown
-    const campaignCounts: Record<CampaignStatus, number> = {
-      DRAFT: 0,
-      ACTIVE: 0,
-      PAUSED: 0,
-      COMPLETED: 0,
-    };
-    for (const c of campaigns) {
-      if (campaignCounts[c.status] !== undefined) {
-        campaignCounts[c.status]++;
-      }
-    }
-
-    // 3. Outreach breakdown
-    let draftOutreach = 0;
-    let approvedOutreach = 0;
-    let sentOutreach = 0;
-    let rejectedOutreach = 0;
-    let failedOutreach = 0;
-
-    for (const msg of emailMessages) {
-      if (msg.status === 'DRAFT') draftOutreach++;
-      else if (msg.status === 'APPROVED' || msg.isApproved) approvedOutreach++;
-      else if (msg.status === 'SENT') sentOutreach++;
-      else if (msg.status === 'REJECTED') rejectedOutreach++;
-      else if (msg.status === 'FAILED') failedOutreach++;
-    }
-
-    const totalOutreach = emailMessages.length;
     const approvalRate =
       totalOutreach > 0
         ? Math.round(((approvedOutreach + sentOutreach) / totalOutreach) * 10000) / 100
         : 0;
-
-    // 4. CRM activities breakdown
-    const crmCounts: Record<CRMActivityType, number> = {
-      STAGE_CHANGE: 0,
-      NOTE: 0,
-      CALL_LOG: 0,
-      EMAIL_SENT: 0,
-      EMAIL_REPLIED: 0,
-    };
-    for (const act of crmActivities) {
-      if (crmCounts[act.type] !== undefined) {
-        crmCounts[act.type]++;
-      }
-    }
-
-    // 5. Tasks breakdown
-    const taskCounts: Record<TaskStatus, number> = {
-      PENDING: 0,
-      IN_PROGRESS: 0,
-      COMPLETED: 0,
-      CANCELLED: 0,
-    };
-    for (const t of tasks) {
-      if (taskCounts[t.status] !== undefined) {
-        taskCounts[t.status]++;
-      }
-    }
 
     return {
       leads: {
@@ -199,7 +302,7 @@ export class AnalyticsService {
         replyRate,
       },
       campaigns: {
-        total: campaigns.length,
+        total: Object.values(campaignCounts).reduce((a, b) => a + b, 0),
         byStatus: campaignCounts,
       },
       outreach: {
@@ -212,11 +315,11 @@ export class AnalyticsService {
         approvalRate,
       },
       crm: {
-        totalActivities: crmActivities.length,
+        totalActivities: Object.values(crmCounts).reduce((a, b) => a + b, 0),
         byType: crmCounts,
       },
       tasks: {
-        total: tasks.length,
+        total: Object.values(taskCounts).reduce((a, b) => a + b, 0),
         pending: taskCounts.PENDING,
         inProgress: taskCounts.IN_PROGRESS,
         completed: taskCounts.COMPLETED,

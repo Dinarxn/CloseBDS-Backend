@@ -16,7 +16,13 @@ import type {
   CallTurnInput,
   CallRecordingMetadata,
 } from './voice.types.js';
-import { maskApiKey, maskSecret } from '../../security/credential-vault.js';
+import {
+  maskApiKey,
+  maskSecret,
+  encryptCredential,
+  decryptCredential,
+} from '../../security/credential-vault.js';
+import { workspaceProviderCredentialRepository } from '../../database/repository.js';
 
 export class VoiceAIService {
   private registry = voiceAIRegistry;
@@ -107,11 +113,37 @@ export class VoiceAIService {
   }
 
   /**
-   * Builds an integration card for a Voice AI provider.
-   * Guarantees all sensitive keys are masked before client exposure.
-   */
-  async getProviderCard(providerId: VoiceAIProviderId): Promise<ProviderIntegrationCard> {
+  * Builds an integration card for a Voice AI provider.
+  * Guarantees all sensitive keys are masked before client exposure.
+  */
+  async getProviderCard(providerId: VoiceAIProviderId, workspaceId?: string): Promise<ProviderIntegrationCard> {
     const adapter = this.getAdapter(providerId);
+
+    // If workspaceId is provided, check for workspace-persisted credentials in database
+    let dbKey: string | undefined;
+    let dbOrg: string | undefined;
+    if (workspaceId) {
+      try {
+        const dbCred = await workspaceProviderCredentialRepository.findByProvider(workspaceId, providerId.toUpperCase());
+        if (dbCred && dbCred.encryptedPayload) {
+          const payload = dbCred.encryptedPayload as any;
+          if (payload.apiKey) {
+            dbKey = decryptCredential(payload.apiKey);
+            (adapter as any).apiKey = dbKey;
+          }
+          if (payload.webhookSecret) {
+            (adapter as any).webhookSecret = decryptCredential(payload.webhookSecret);
+          }
+          if (payload.orgId) {
+            dbOrg = payload.orgId;
+            (adapter as any).orgId = payload.orgId;
+          }
+        }
+      } catch {
+        // Fallback
+      }
+    }
+
     const configured = adapter.isConfigured();
     const health = await adapter.healthCheck();
 
@@ -125,21 +157,14 @@ export class VoiceAIService {
       verificationState = 'TEST_MODE';
     }
 
+    // SECURITY: Masked credentials are sourced exclusively from workspace vault.
+    // process.env is NOT used as a fallback — each workspace must supply its own credentials.
     const maskedCredentials: Record<string, string> = {};
-    if (providerId === 'retell') {
-      const key = process.env.RETELL_API_KEY;
-      if (key) {
-        maskedCredentials.apiKeyMasked = maskApiKey(key);
-      }
-    } else if (providerId === 'vapi') {
-      const key = process.env.VAPI_API_KEY;
-      if (key) {
-        maskedCredentials.apiKeyMasked = maskApiKey(key);
-      }
-      const org = process.env.VAPI_ORG_ID;
-      if (org) {
-        maskedCredentials.orgIdMasked = maskSecret(org);
-      }
+    if (dbKey) {
+      maskedCredentials.apiKeyMasked = maskApiKey(dbKey);
+    }
+    if (dbOrg) {
+      maskedCredentials.orgIdMasked = maskSecret(dbOrg);
     }
 
     return {
@@ -158,33 +183,47 @@ export class VoiceAIService {
   /**
    * Lists all Voice AI provider integration cards.
    */
-  async listProviderCards(): Promise<ProviderIntegrationCard[]> {
+  async listProviderCards(workspaceId?: string): Promise<ProviderIntegrationCard[]> {
     const providers: VoiceAIProviderId[] = ['retell', 'vapi'];
-    return Promise.all(providers.map((p) => this.getProviderCard(p)));
+    return Promise.all(providers.map((p) => this.getProviderCard(p, workspaceId)));
   }
 
   /**
    * Updates credentials for a Voice AI provider.
+   * SECURITY: Credentials are persisted to the workspace-scoped AES-256-GCM vault
+   * and set on the adapter instance for the current request only.
+   * process.env is NEVER mutated — workspace isolation requires per-request credential loading.
    */
   async updateCredentials(
     providerId: VoiceAIProviderId,
-    credentials: { apiKey?: string; webhookSecret?: string; orgId?: string }
+    credentials: { apiKey?: string; webhookSecret?: string; orgId?: string },
+    workspaceId?: string
   ): Promise<ProviderIntegrationCard> {
-    const adapter = this.getAdapter(providerId);
-    if (providerId === 'retell') {
-      if (credentials.apiKey) process.env.RETELL_API_KEY = credentials.apiKey;
-      if (credentials.webhookSecret) process.env.RETELL_WEBHOOK_SECRET = credentials.webhookSecret;
-      (adapter as any).apiKey = credentials.apiKey || (adapter as any).apiKey;
-      (adapter as any).webhookSecret = credentials.webhookSecret || (adapter as any).webhookSecret;
-    } else if (providerId === 'vapi') {
-      if (credentials.apiKey) process.env.VAPI_API_KEY = credentials.apiKey;
-      if (credentials.orgId) process.env.VAPI_ORG_ID = credentials.orgId;
-      if (credentials.webhookSecret) process.env.VAPI_SERVER_SECRET = credentials.webhookSecret;
-      (adapter as any).apiKey = credentials.apiKey || (adapter as any).apiKey;
-      (adapter as any).orgId = credentials.orgId || (adapter as any).orgId;
-      (adapter as any).serverSecret = credentials.webhookSecret || (adapter as any).serverSecret;
+    if (!workspaceId) {
+      throw new Error('workspaceId is required for credential updates — global credentials are not supported');
     }
-    return this.getProviderCard(providerId);
+
+    // Persist encrypted credentials to workspace-scoped vault (primary storage)
+    const encryptedPayload: Record<string, any> = {};
+    const maskedDisplay: Record<string, any> = {};
+    if (credentials.apiKey) {
+      encryptedPayload.apiKey = encryptCredential(credentials.apiKey);
+      maskedDisplay.apiKeyMasked = maskApiKey(credentials.apiKey);
+    }
+    if (credentials.webhookSecret) {
+      encryptedPayload.webhookSecret = encryptCredential(credentials.webhookSecret);
+    }
+    if (credentials.orgId) {
+      encryptedPayload.orgId = credentials.orgId;
+      maskedDisplay.orgIdMasked = maskSecret(credentials.orgId);
+    }
+    await workspaceProviderCredentialRepository.upsert(workspaceId, providerId.toUpperCase(), {
+      encryptedPayload,
+      maskedDisplay,
+      connectionStatus: 'CONNECTED',
+    });
+
+    return this.getProviderCard(providerId, workspaceId);
   }
 }
 

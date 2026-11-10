@@ -93,6 +93,7 @@ export function getRateLimitConfig(max = 100, timeWindowMs = 60000): RateLimitOp
     timeWindow: timeWindowMs,
     allowList: ['127.0.0.1', 'localhost', '::1'],
     errorResponseBuilder: () => ({
+      statusCode: 429,
       error: {
         code: 'RATE_LIMIT_EXCEEDED',
         message: 'Rate limit exceeded. Please slow down your requests.',

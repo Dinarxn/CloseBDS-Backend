@@ -79,6 +79,15 @@ enum TaskStatus {
   CANCELLED
 }
 
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  RESCHEDULED
+  NO_SHOW
+}
+
 enum SuppressionType {
   EMAIL
   DOMAIN
@@ -170,6 +179,9 @@ model User {
   notifications Notification[]
   crmActivities CRMActivity[]
   auditLogs     AuditLog[]
+  passwordResetTokens PasswordResetToken[]
+  userPreferences     UserPreference[]
+  appointments        Appointment[]
 
   @@index([workspaceId])
   @@index([email])
@@ -195,6 +207,10 @@ model Workspace {
   calls                  Call[]
   n8nIntegrations        N8nIntegration[]
   n8nWebhookDeliveries   N8nWebhookDelivery[]
+  providerCredentials    WorkspaceProviderCredential[]
+  telephonyPhoneNumbers  TelephonyPhoneNumber[]
+  settings               WorkspaceSetting?
+  appointments           Appointment[]
 
   @@index([slug])
   @@map("workspaces")
@@ -226,16 +242,21 @@ model Campaign {
 
 // 4. Lead: Target business or organization entity
 model Lead {
-  id           String     @id @default(uuid())
-  workspaceId  String
-  campaignId   String?
-  businessName String
-  domain       String?
-  phone        String?
-  address      String?
-  status       LeadStatus @default(NEW)
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  id                String     @id @default(uuid())
+  workspaceId       String
+  campaignId        String?
+  businessName      String
+  domain            String?
+  phone             String?
+  address           String?
+  status            LeadStatus @default(NEW)
+  practiceType      String?
+  chairCount        Int?
+  doctorCount       Int?
+  googleRating      Decimal?   @db.Decimal(3, 2)
+  googleReviewCount Int?
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
 
   workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   campaign      Campaign?      @relation(fields: [campaignId], references: [id], onDelete: SetNull)
@@ -247,12 +268,14 @@ model Lead {
   crmActivities CRMActivity[]
   tasks         Task[]
   calls         Call[]
+  appointments  Appointment[]
 
   @@unique([workspaceId, businessName, domain, phone, address], name: "unique_lead_match_key")
   @@index([workspaceId])
   @@index([campaignId])
   @@index([status])
   @@index([domain])
+  @@index([practiceType])
   @@map("leads")
 }
 
@@ -271,6 +294,7 @@ model Contact {
   lead          Lead           @relation(fields: [leadId], references: [id], onDelete: Cascade)
   emailMessages EmailMessage[]
   calls         Call[]
+  appointments  Appointment[]
 
   @@index([leadId])
   @@index([email])
@@ -534,6 +558,25 @@ model VoiceAgentConfig {
   escalationConditions   String[]
   fallbackBehavior       String?
   maxDurationSeconds     Int             @default(300)
+  provider               String          @default("mock")
+  status                 String          @default("DRAFT")
+  modelId                String?
+  voiceId                String?
+  voiceProvider          String?
+  temperature            Float?
+  maxTokens              Int?
+  voiceSpeed             Float?
+  voicePitch             Float?
+  voiceStability         Float?
+  agentPersona           String?
+  speakingStyle          String?
+  knowledgePoints        String[]        @default([])
+  objectionRules         Json?
+  structuredQuestions    Json?
+  assignedPhoneNumberId  String?
+  safetyGuardrails       Json?
+  inboundEnabled         Boolean         @default(false)
+  outboundEnabled        Boolean         @default(true)
   createdAt              DateTime        @default(now())
   updatedAt              DateTime        @updatedAt
 
@@ -569,6 +612,9 @@ model Call {
   providerName          String            @default("twilio")
   providerCallId        String?
   blockedReason         String?
+  recordingUrl          String?
+  recordingDuration     Int?
+  recordingChannels     Int?
   createdAt             DateTime          @default(now())
   updatedAt             DateTime          @updatedAt
 
@@ -733,3 +779,139 @@ model WorkspaceCallingPolicy {
 
   @@map("workspace_calling_policies")
 }
+
+
+// ==============================================================================
+// PHASE 3 EXPANSIONS: WORKSPACE CREDENTIALS, TELEPHONY & RECOVERY
+// ==============================================================================
+
+// 28. WorkspaceProviderCredential: Encrypted provider credentials (Twilio, Retell, Vapi, Resend, Meta WhatsApp)
+model WorkspaceProviderCredential {
+  id               String   @id @default(uuid())
+  workspaceId      String
+  provider         String
+  encryptedPayload Json
+  maskedDisplay    Json
+  connectionStatus String   @default("NOT_CONFIGURED")
+  accountDetails   Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  workspace        Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, provider])
+  @@index([workspaceId])
+  @@map("workspace_provider_credentials")
+}
+
+// 29. TelephonyPhoneNumber: Managed telephony carrier phone numbers with routing and capabilities
+model TelephonyPhoneNumber {
+  id                      String   @id @default(uuid())
+  workspaceId             String
+  phoneNumber             String
+  friendlyName            String?
+  provider                String   @default("twilio")
+  status                  String   @default("ACTIVE")
+  capabilities            Json
+  assignedAgentId         String?
+  inboundWebhookUrl       String?
+  outboundCallerIdEnabled Boolean  @default(true)
+  purchasedWithoutAutoBuy Boolean  @default(true)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  workspace               Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, phoneNumber])
+  @@index([workspaceId])
+  @@map("telephony_phone_numbers")
+}
+
+// 30. PasswordResetToken: Secure hashed time-limited password recovery tokens
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+// 31. WorkspaceSetting: Workspace governance, safety thresholds, daily caps, and kill switches
+model WorkspaceSetting {
+  id                    String    @id @default(uuid())
+  workspaceId           String    @unique
+  killSwitchActive      Boolean   @default(false)
+  defaultDailyCap       Int       @default(50)
+  safetyThreshold       Int       @default(70)
+  autoSuppressionOptOut Boolean   @default(true)
+  safetyConfig          Json?
+  aiConfig              Json?
+  suppressionConfig     Json?
+  generalConfig         Json?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  workspace             Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("workspace_settings")
+}
+
+// 32. UserPreference: User notification preferences and interface settings
+model UserPreference {
+  id                      String    @id @default(uuid())
+  userId                  String
+  workspaceId             String
+  emailNotifications      Boolean   @default(true)
+  qualificationAlerts     Boolean   @default(true)
+  outreachApprovalAlerts  Boolean   @default(true)
+  taskDueAlerts           Boolean   @default(true)
+  theme                   String    @default("system")
+  language                String    @default("en")
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId], name: "workspaceId_userId")
+  @@index([userId])
+  @@index([workspaceId])
+  @@map("user_preferences")
+}
+
+// 33. Appointment: Dedicated meeting and appointment scheduling model
+model Appointment {
+  id                 String            @id @default(uuid())
+  workspaceId        String
+  leadId             String
+  contactId          String?
+  userId             String?
+  title              String            @default("Meeting")
+  scheduledStartTime DateTime
+  scheduledEndTime   DateTime
+  meetingLink        String?
+  status             AppointmentStatus @default(SCHEDULED)
+  notes              String?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  lead      Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  contact   Contact?  @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  user      User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@index([leadId])
+  @@index([contactId])
+  @@index([userId])
+  @@index([status])
+  @@index([scheduledStartTime])
+  @@map("appointments")
+}
+

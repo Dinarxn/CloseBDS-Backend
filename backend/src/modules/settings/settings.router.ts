@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { FastifyPluginAsync } from 'fastify';
 import { settingsService } from './settings.service.js';
 import {
@@ -9,7 +10,19 @@ import {
 import {
   requireAuthenticatedUser,
   requireWorkspaceContext,
+  requireRole,
 } from '../../core/permissions/auth-guards.js';
+
+export const listAuditLogsQuerySchema = z.object({
+  eventType: z.string().max(100).optional(),
+  entityType: z.string().max(100).optional(),
+  entityId: z.string().max(100).optional(),
+  userId: z.string().uuid().optional(),
+  startDate: z.string().datetime().optional().transform((val) => (val ? new Date(val) : undefined)),
+  endDate: z.string().datetime().optional().transform((val) => (val ? new Date(val) : undefined)),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+});
 
 export const settingsRouter: FastifyPluginAsync = async (fastify): Promise<void> => {
   fastify.addHook('preHandler', requireAuthenticatedUser);
@@ -27,22 +40,26 @@ export const settingsRouter: FastifyPluginAsync = async (fastify): Promise<void>
   });
 
   // 2. PATCH /api/v1/settings/workspace - Update workspace settings
-  fastify.patch('/workspace', async (request, reply) => {
-    const workspaceId = request.workspaceContext!.workspaceId;
-    const userId = request.workspaceContext!.userId;
-    const body = updateWorkspaceSettingsSchema.parse(request.body);
+  fastify.patch(
+    '/workspace',
+    { preHandler: [requireRole(['OWNER', 'ADMIN'])] },
+    async (request, reply) => {
+      const workspaceId = request.workspaceContext!.workspaceId;
+      const userId = request.workspaceContext!.userId;
+      const body = updateWorkspaceSettingsSchema.parse(request.body);
 
-    const settings = await settingsService.updateWorkspaceSettings(
-      workspaceId,
-      userId,
-      body
-    );
+      const settings = await settingsService.updateWorkspaceSettings(
+        workspaceId,
+        userId,
+        body
+      );
 
-    return reply.status(200).send({
-      success: true,
-      settings,
-    });
-  });
+      return reply.status(200).send({
+        success: true,
+        settings,
+      });
+    }
+  );
 
   // 3. GET /api/v1/settings/preferences - User preferences
   fastify.get('/preferences', async (request, reply) => {
@@ -95,29 +112,55 @@ export const settingsRouter: FastifyPluginAsync = async (fastify): Promise<void>
   });
 
   // 7. POST /api/v1/settings/suppressions - Add suppression
-  fastify.post('/suppressions', async (request, reply) => {
-    const workspaceId = request.workspaceContext!.workspaceId;
-    const userId = request.workspaceContext!.userId;
-    const body = createSuppressionSchema.parse(request.body);
+  fastify.post(
+    '/suppressions',
+    { preHandler: [requireRole(['OWNER', 'ADMIN'])] },
+    async (request, reply) => {
+      const workspaceId = request.workspaceContext!.workspaceId;
+      const userId = request.workspaceContext!.userId;
+      const body = createSuppressionSchema.parse(request.body);
 
-    const suppression = await settingsService.addSuppression(workspaceId, userId, body);
+      const suppression = await settingsService.addSuppression(workspaceId, userId, body);
 
-    return reply.status(201).send({
-      success: true,
-      suppression,
-    });
-  });
+      return reply.status(201).send({
+        success: true,
+        suppression,
+      });
+    }
+  );
 
   // 8. DELETE /api/v1/settings/suppressions/:id - Delete suppression
-  fastify.delete<{ Params: { id: string } }>('/suppressions/:id', async (request, reply) => {
-    const workspaceId = request.workspaceContext!.workspaceId;
-    const userId = request.workspaceContext!.userId;
+  fastify.delete<{ Params: { id: string } }>(
+    '/suppressions/:id',
+    { preHandler: [requireRole(['OWNER', 'ADMIN'])] },
+    async (request, reply) => {
+      const workspaceId = request.workspaceContext!.workspaceId;
+      const userId = request.workspaceContext!.userId;
 
-    await settingsService.removeSuppression(request.params.id, workspaceId, userId);
+      await settingsService.removeSuppression(request.params.id, workspaceId, userId);
 
-    return reply.status(200).send({
-      success: true,
-      message: 'Suppression record removed successfully',
-    });
-  });
+      return reply.status(200).send({
+        success: true,
+        message: 'Suppression record removed successfully',
+      });
+    }
+  );
+
+  // 9. GET /api/v1/settings/audit-logs - Back-office audit trail
+  fastify.get(
+    '/audit-logs',
+    { preHandler: [requireRole(['OWNER', 'ADMIN'])] },
+    async (request, reply) => {
+      const workspaceId = request.workspaceContext!.workspaceId;
+      const query = listAuditLogsQuerySchema.parse(request.query);
+
+      const result = await settingsService.listAuditLogs(workspaceId, query);
+
+      return reply.status(200).send({
+        success: true,
+        ...result,
+        items: result.data,
+      });
+    }
+  );
 };

@@ -101,7 +101,7 @@ async function runVoiceSharedContractsTests() {
   // 2c. Tampered auth tag must fail authentication
   const tamperedTagPayload = {
     ...encrypted,
-    tag: encrypted.tag.slice(0, -2) + 'ff',
+    tag: encrypted.tag.slice(0, -2) + (encrypted.tag.endsWith('ff') ? '00' : 'ff'),
   };
   assert.throws(
     () => {

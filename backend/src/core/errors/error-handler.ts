@@ -66,6 +66,20 @@ export function fastifyErrorHandler(
     return;
   }
 
+  // Handle rate limit errors
+  const anyErr = error as any;
+  if (anyErr?.statusCode === 429 || anyErr?.error?.code === 'RATE_LIMIT_EXCEEDED') {
+    request.log.warn({ err: error, requestId }, 'Rate Limit Exceeded');
+    reply.status(429).send({
+      error: {
+        code: 'RATE_LIMIT_EXCEEDED',
+        message: anyErr.error?.message || anyErr.message || 'Rate limit exceeded. Please slow down your requests.',
+        requestId,
+      },
+    });
+    return;
+  }
+
   // Handle standard Fastify errors (e.g. 404, 400, FST_ERR_*)
   const fastifyErr = error as FastifyError;
   if (fastifyErr.statusCode && fastifyErr.statusCode < 500) {
@@ -102,6 +116,55 @@ export function fastifyErrorHandler(
       },
     });
     return;
+  }
+
+  // Handle Prisma known request errors (e.g. P2002, P2025, P2003)
+  if (
+    error.name === 'PrismaClientKnownRequestError' ||
+    Boolean((error as any)?.code?.startsWith?.('P'))
+  ) {
+    const pErr = error as any;
+    if (pErr.code === 'P2002') {
+      request.log.warn({ err: error, requestId }, 'Prisma Unique Constraint Violation');
+      const target = Array.isArray(pErr.meta?.target)
+        ? pErr.meta.target.join(', ')
+        : (pErr.meta?.target as string) || 'unique field';
+      reply.status(409).send({
+        error: {
+          code: 'CONFLICT',
+          message: `Unique constraint violation on field(s): ${target}`,
+          details: pErr.meta,
+          requestId,
+        },
+      });
+      return;
+    }
+
+    if (pErr.code === 'P2025') {
+      request.log.warn({ err: error, requestId }, 'Prisma Record Not Found');
+      reply.status(404).send({
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Target record not found for update or deletion',
+          details: pErr.meta,
+          requestId,
+        },
+      });
+      return;
+    }
+
+    if (pErr.code === 'P2003') {
+      request.log.warn({ err: error, requestId }, 'Prisma Foreign Key Constraint Violation');
+      reply.status(400).send({
+        error: {
+          code: 'BAD_REQUEST',
+          message: 'Foreign key constraint violation',
+          details: pErr.meta,
+          requestId,
+        },
+      });
+      return;
+    }
   }
 
   // Handle all other unexpected internal errors (HTTP 500)

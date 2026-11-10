@@ -24,15 +24,7 @@ export class OperationsService {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
 
-    const [leads, calls, callingPolicy, agentConfigsCount] = await Promise.all([
-      prisma.lead.findMany({
-        where: { workspaceId },
-        select: { status: true },
-      }),
-      prisma.call.findMany({
-        where: { workspaceId },
-        select: { status: true, createdAt: true, isApproved: true },
-      }),
+    const [callingPolicy, agentConfigsCount] = await Promise.all([
       callingPolicyService.getOrCreatePolicy(workspaceId),
       (prisma as any).voiceAgentConfig.count({ where: { workspaceId } }),
     ]);
@@ -56,21 +48,92 @@ export class OperationsService {
       OPT_OUT: 0,
     };
 
-    for (const lead of leads) {
-      const status = lead.status as CanonicalLeadStatus;
-      if (leadCounts[status] !== undefined) {
-        leadCounts[status]++;
+    const callStatusCounts: Record<string, number> = {};
+    let completedToday = 0;
+    let callsToday = 0;
+
+    let useGroupBy =
+      typeof (prisma.lead as any)?.groupBy === 'function' &&
+      typeof (prisma.call as any)?.groupBy === 'function';
+
+    if (useGroupBy) {
+      try {
+        const [leadGroups, callGroups, ctCompleted, ctActiveToday] = await Promise.all([
+          (prisma.lead as any).groupBy({
+            by: ['status'],
+            where: { workspaceId },
+            _count: { id: true },
+          }),
+          (prisma.call as any).groupBy({
+            by: ['status'],
+            where: { workspaceId },
+            _count: { id: true },
+          }),
+          prisma.call.count({
+            where: {
+              workspaceId,
+              status: 'COMPLETED',
+              createdAt: { gte: startOfDay },
+            },
+          }),
+          prisma.call.count({
+            where: {
+              workspaceId,
+              createdAt: { gte: startOfDay },
+              status: { in: ['INITIATING', 'RINGING', 'IN_PROGRESS', 'COMPLETED'] as any },
+            },
+          }),
+        ]);
+
+        for (const g of leadGroups) {
+          const s = g.status as CanonicalLeadStatus;
+          if (leadCounts[s] !== undefined) {
+            leadCounts[s] = g._count.id;
+          }
+        }
+
+        for (const g of callGroups) {
+          callStatusCounts[g.status] = g._count.id;
+        }
+
+        completedToday = ctCompleted;
+        callsToday = ctActiveToday;
+      } catch {
+        useGroupBy = false;
       }
     }
 
-    const callStatusCounts: Record<string, number> = {};
-    let completedToday = 0;
+    if (!useGroupBy) {
+      const [leads, calls] = await Promise.all([
+        prisma.lead.findMany({
+          where: { workspaceId },
+          select: { status: true },
+        }),
+        prisma.call.findMany({
+          where: { workspaceId },
+          select: { status: true, createdAt: true, isApproved: true },
+        }),
+      ]);
 
-    for (const call of calls) {
-      callStatusCounts[call.status] = (callStatusCounts[call.status] || 0) + 1;
-      if (call.status === 'COMPLETED' && new Date(call.createdAt) >= startOfDay) {
-        completedToday++;
+      for (const lead of leads) {
+        const status = lead.status as CanonicalLeadStatus;
+        if (leadCounts[status] !== undefined) {
+          leadCounts[status]++;
+        }
       }
+
+      for (const call of calls) {
+        callStatusCounts[call.status] = (callStatusCounts[call.status] || 0) + 1;
+        if (call.status === 'COMPLETED' && new Date(call.createdAt) >= startOfDay) {
+          completedToday++;
+        }
+      }
+
+      callsToday = calls.filter(
+        (c: any) =>
+          new Date(c.createdAt) >= startOfDay &&
+          ['INITIATING', 'RINGING', 'IN_PROGRESS', 'COMPLETED'].includes(c.status)
+      ).length;
     }
 
     const telephonyAdapter = providerRegistry.getAdapter<VoiceProviderAdapter>('Twilio');
@@ -78,12 +141,6 @@ export class OperationsService {
 
     const aiAdapter = providerRegistry.getByCategory('AI_LLM')[0];
     const voiceAiConfigured = aiAdapter ? aiAdapter.isConfigured() : false;
-
-    const callsToday = calls.filter(
-      (c: any) =>
-        new Date(c.createdAt) >= startOfDay &&
-        ['INITIATING', 'RINGING', 'IN_PROGRESS', 'COMPLETED'].includes(c.status)
-    ).length;
 
     const closebdsConfigured = Boolean(
       process.env.CLOSEBDS_API_KEY && process.env.CLOSEBDS_API_KEY.trim().length > 0
@@ -119,7 +176,7 @@ export class OperationsService {
       voiceAiStatus: voiceAiConfigured ? 'CONNECTED' : 'NOT_CONFIGURED',
       closebdsStatus: closebdsConfigured ? 'CONNECTED' : 'NOT_CONFIGURED',
       leadPool: {
-        total: leads.length,
+        total: Object.values(leadCounts).reduce((a, b) => a + b, 0),
         discovered: leadCounts.DISCOVERED,
         imported: leadCounts.IMPORTED,
         researchPending: leadCounts.RESEARCH_PENDING,
