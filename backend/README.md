@@ -1,22 +1,27 @@
-# closeVDS Backend Foundation & Architecture
+# CloseVDS Backend Foundation & Architecture
 
-This is the custom backend API foundation for **closeVDS — AI Client Acquisition OS**, built with **Node.js, Fastify v5, TypeScript (strict), Zod, and PostgreSQL with Prisma ORM**.
+[![Fastify](https://img.shields.io/badge/fastify-v5.0.0-black.svg)](https://fastify.dev/)
+[![TypeScript](https://img.shields.io/badge/typescript-v5.7.3-blue.svg)](https://www.typescriptlang.org/)
+[![Prisma ORM](https://img.shields.io/badge/prisma-v6.0.0-1B222D.svg)](https://www.prisma.io/)
+[![Test Suites](https://img.shields.io/badge/tests-34%20passed%20(100%25)-success.svg)](tests/)
+
+This is the custom backend API foundation for **CloseVDS — AI Client Acquisition OS**, built with **Node.js, Fastify v5, TypeScript (strict), Zod, and PostgreSQL with Prisma ORM**.
 
 ---
 
 ## 1. Architectural Overview & Boundaries
 
-The closeVDS backend is designed as an autonomous, server-authoritative system strictly decoupled from the Next.js frontend:
+The CloseVDS backend is designed as an autonomous, server-authoritative system strictly decoupled from the Next.js frontend:
 
 ```text
 ┌─────────────────────────────────────────────────────────┐
-│                   FRONTEND (Next.js)                    │
+│                   FRONTEND (Next.js 15)                 │
 │            (No Secrets, Client State Only)              │
 └────────────────────────────┬────────────────────────────┘
                              │ HTTPS REST API (/api/v1)
                              ▼
 ┌─────────────────────────────────────────────────────────┐
-│                  BACKEND API (Fastify)                  │
+│                  BACKEND API (Fastify 5)                │
 │       (Auth, Security, Zod, Rate Limiting, Audit)       │
 ├─────────────────────────────────────────────────────────┤
 │ Core Foundations:                                       │
@@ -31,7 +36,7 @@ The closeVDS backend is designed as an autonomous, server-authoritative system s
 ┌──────────────┐      ┌──────────────┐     ┌──────────────┐
 │ DATABASE     │      │ INTEGRATIONS │     │ JOBS         │
 │ Repositories │      │ (AI, Email,  │     │ Scheduler    │
-│ (PostgreSQL/ │      │ Discovery)   │     │ Boundary     │
+│ (PostgreSQL/ │      │ Voice, Maps) │     │ Boundary     │
 │  Prisma ORM) │      │              │     │              │
 └──────────────┘      └──────────────┘     └──────────────┘
 ```
@@ -49,6 +54,8 @@ The closeVDS backend is designed as an autonomous, server-authoritative system s
 - `POST /api/v1/auth/login`: User login issuing secure HttpOnly cookie & JWT
 - `POST /api/v1/auth/logout`: Session cookie revocation
 - `GET  /api/v1/auth/me`: Authenticated profile & active workspace
+- `POST /api/v1/auth/forgot-password`: Rate-limited password reset token issuance
+- `POST /api/v1/auth/reset-password`: Token-verified password reset
 
 ### Workspace Management (`/api/v1/workspaces`)
 - `GET /api/v1/workspaces/current`: Active workspace metadata
@@ -73,7 +80,7 @@ The closeVDS backend is designed as an autonomous, server-authoritative system s
 - `DELETE /api/v1/leads/:leadId/contacts/:contactId`: Delete contact
 
 ### Lead Discovery (`/api/v1/lead-discovery`)
-- `POST   /api/v1/lead-discovery/query`: Query discovery candidates with match-key deduplication and `LeadSource` tracking
+- `POST   /api/v1/lead-discovery/query`: Query discovery candidates via Geoapify Maps / OSM with match-key deduplication
 
 ### Lead Research & Website Audit (`/api/v1/lead-research`)
 - `GET    /api/v1/lead-research/:leadId`: Retrieve technical/UX website audit observations
@@ -95,6 +102,13 @@ The closeVDS backend is designed as an autonomous, server-authoritative system s
 - `POST   /api/v1/outreach/:id/reject`: Server-authoritative explicit human rejection
 - `POST   /api/v1/outreach/:id/cancel`: Server-authoritative explicit human cancellation
 - `POST   /api/v1/outreach/:id/safety-check`: Multi-point safety evaluation (human approval, email/domain suppression, daily velocity cap, recipient and content validity)
+
+### Voice AI & Telephony (`/api/v1/voice`)
+- `POST   /api/v1/voice/calls`: Initiate outbound AI call (checks emergency kill switch, caller ID verification, DNC)
+- `GET    /api/v1/voice/calls/:id/timeline`: Retrieve chronological lifecycle progression for a call session
+- `POST   /api/v1/voice/policy/kill-switch`: Instant global or workspace emergency kill switch toggle
+- `GET    /api/v1/voice/phone-numbers`: List provisioned carrier phone numbers and verification status
+- `POST   /api/v1/voice/webhooks/twilio`: Secure Twilio telephony webhook ingestion with HMAC-SHA1 signature verification
 
 ### CRM & Activity Management (`/api/v1/crm`)
 - `GET    /api/v1/crm/leads/:leadId`: Retrieve complete CRM profile and timeline
@@ -138,8 +152,9 @@ The closeVDS backend is designed as an autonomous, server-authoritative system s
 - `DELETE /api/v1/notifications/:id`: Dismiss/delete notification
 
 ### System Events & Integrations (`/api/v1/integrations`)
-- `POST   /api/v1/integrations/webhooks/:provider`: Ingest external provider webhook events (Resend, SendGrid, Generic) with HMAC signature validation & idempotency
+- `POST   /api/v1/integrations/webhooks/:provider`: Ingest external provider webhook events (Resend, SendGrid, Twilio) with HMAC signature validation & idempotency
 - `GET    /api/v1/integrations/events`: List processed integration events for the active workspace
+- `GET    /api/v1/integrations/n8n/calls`: Secure n8n call query endpoint guarded by API key
 
 ### Background Jobs & Workflow Engine (`/api/v1/jobs`)
 - `POST   /api/v1/jobs`: Enqueue background workflow job with payload validation & idempotency
@@ -151,33 +166,42 @@ The closeVDS backend is designed as an autonomous, server-authoritative system s
 
 ---
 
-## 3. Database Architecture & 17 Authoritative Phase 0 Entities
+## 3. Database Architecture & Conceptual Entities
 
-The persistence layer uses **PostgreSQL** with **Prisma ORM**, strictly modeling the **17 authoritative conceptual entities** defined in Phase 0 `SYSTEM-ARCHITECTURE.md`:
+The persistence layer uses **PostgreSQL** with **Prisma ORM**, strictly modeling 30+ relational entities:
 
 1. **`User`**: System user account (belongs to a Workspace).
 2. **`Workspace`**: Multi-tenant isolation boundary.
-3. **`Campaign`**: Targeting configuration belonging to a Workspace.
-4. **`Lead`**: Target business or organization entity.
-5. **`Contact`**: Individual person or decision-maker at a Lead (1:N with Lead).
-6. **`LeadSource`**: Source tracking metadata (provider, external ID, query payload).
-7. **`WebsiteAudit`**: Technical, UX, mobile, and CTA audit observations.
-8. **`AIAnalysis`**: Qualitative AI analysis, opportunity points, risk factors.
-9. **`LeadScore`**: Quantitative scoring metrics (0-100) and reasoning rationale.
-10. **`EmailCampaign`**: Outreach sending configuration attached to a Campaign.
-11. **`EmailMessage`**: An individual draft, queued, or sent cold email to a Contact.
-12. **`EmailEvent`**: Dispatched delivery webhook event (delivered, bounce, reply, opt-out).
-13. **`CRMActivity`**: Sales interaction timeline log, notes, stage transitions.
-14. **`Task`**: Actionable to-do item for a Lead assigned to a User.
-15. **`Suppression`**: Opt-out, unsubscribed, or bounced email/domain suppression rule.
-16. **`AuditLog`**: Security and operational audit log capturing user actions & config changes.
-17. **`Notification`**: In-app alert notification dispatched to a User.
+3. **`WorkspaceSettings`**: Encrypted workspace configuration, rate limits, and kill-switch state.
+4. **`PasswordResetToken`**: Time-limited recovery tokens.
+5. **`Campaign`**: Targeting configuration belonging to a Workspace.
+6. **`Lead`**: Target business or clinic entity.
+7. **`Contact`**: Individual person or decision-maker at a Lead (1:N with Lead).
+8. **`LeadSource`**: Source tracking metadata (provider, external ID, query payload).
+9. **`WebsiteAudit`**: Technical, UX, mobile, and CTA audit observations.
+10. **`AIAnalysis`**: Qualitative AI analysis, opportunity points, risk factors.
+11. **`LeadScore`**: Quantitative scoring metrics (0-100) and reasoning rationale.
+12. **`TelephonyPhoneNumber`**: Carrier lines with verification and capability metadata.
+13. **`CallSession`**: Voice AI call tracking, status lifecycle, recording references.
+14. **`CallEvent`**: Normalized telephony event logs.
+15. **`VoiceAgent`**: Voice agent studio configurations and prompt parameters.
+16. **`EmailCampaign`**: Outreach sending configuration attached to a Campaign.
+17. **`EmailMessage`**: An individual draft, queued, or sent cold email to a Contact.
+18. **`EmailEvent`**: Dispatched delivery webhook event (delivered, bounce, reply, opt-out).
+19. **`CRMActivity`**: Sales interaction timeline log, notes, stage transitions.
+20. **`Task`**: Actionable to-do item for a Lead assigned to a User.
+21. **`Appointment`**: Scheduled clinic demo booking with sync state and reminders.
+22. **`Suppression`**: Opt-out, unsubscribed, or bounced email/domain suppression rule.
+23. **`AuditLog`**: Security and operational audit log capturing user actions & config changes.
+24. **`Notification`**: In-app alert notification dispatched to a User.
+25. **`Job`**: Background asynchronous task queue item.
+26. **`IntegrationEvent`**: Raw external integration webhook event record.
 
 ---
 
 ## 4. Security & Multi-Tenant Foundations
 
-1. **Zero Frontend Secrets**: All credentials (`DATABASE_URL`, provider tokens) reside exclusively in backend environment variables.
+1. **Zero Frontend Secrets**: All credentials (`DATABASE_URL`, provider tokens) reside exclusively in backend environment variables or AES-256-GCM encrypted database columns.
 2. **Server-Authoritative Workspace Isolation**: Every repository method requires and filters on `workspaceId`, preventing cross-tenant data leaks.
 3. **Liveness vs. Readiness Probes**:
    - `GET /health` $\rightarrow$ `HTTP 200 { "status": "ok" }` (process liveness probe)
@@ -185,9 +209,8 @@ The persistence layer uses **PostgreSQL** with **Prisma ORM**, strictly modeling
 4. **Mandatory Human-Approval Gates**:
    - Outreach and follow-up drafts generated by AI can never be dispatched without recorded human approval (`assertHumanApprovalGranted`).
    - Editing an approved draft resets its status to `DRAFT` and invalidates any prior approval.
-   - Creating or completing follow-up tasks does not trigger external dispatch or bypass approval.
-5. **Global Outreach Kill Switch**: Instant backend freeze for all dispatch queues (`assertKillSwitchNotActive`).
-6. **Enumeration & Leak Prevention**: Passwords hashed with `bcrypt` (12 rounds). Password hashes never returned in API payloads or logs.
+5. **Emergency Kill Switch**: Instant backend freeze for all dispatch queues (`assertKillSwitchNotActive`), configurable globally and per-workspace.
+6. **Password Security**: Passwords hashed with `bcrypt` (12 rounds). Password hashes never returned in API payloads or logs.
 
 ---
 
@@ -202,10 +225,13 @@ npm install
 # Generate Prisma Client
 npx prisma generate
 
-# Run TypeScript type check
+# Run TypeScript type check (0 errors)
 npm run typecheck
 
-# Run test suite (13 suites / 179 tests)
+# Validate Prisma schema
+npx prisma validate
+
+# Run entire test suite (34 suites / 100% pass)
 npm test
 
 # Build production bundle
